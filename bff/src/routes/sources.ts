@@ -970,12 +970,14 @@ export default async function sourceRoutes(app: FastifyInstance) {
 
   // Multi-genre, tag & format discovery
   app.get('/api/discover/explore', async (req) => {
-    const { genre, tag, format, sort, q: queryTerm, page } = (req.query ?? {}) as any;
+    const { genre, tag, format, sort, lang, source, q: queryTerm, page } = (req.query ?? {}) as any;
     const items = await exploreManga({
       genre: genre || undefined,
       tag: tag || undefined,
       format: format || undefined,
       sort: sort || undefined,
+      lang: lang || undefined,
+      source: source || undefined,
       q: queryTerm || undefined,
       page: page ? Number(page) : 1,
     });

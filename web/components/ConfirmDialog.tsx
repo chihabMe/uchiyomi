@@ -15,11 +15,13 @@ export function Modal({
   onClose,
   children,
   wide,
+  extraWide,
 }: {
   title: string;
   onClose: () => void;
   children: React.ReactNode;
   wide?: boolean;
+  extraWide?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   // Read through a ref so the effect below can depend on nothing. Callers pass `onClose={() => ...}`, a new
@@ -51,7 +53,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`glass max-h-[88vh] w-full ${wide ? 'max-w-lg' : 'max-w-md'} overflow-y-auto rounded-2xl border border-ink-700 p-5`}
+        className={`glass max-h-[90vh] w-full ${extraWide ? 'max-w-4xl lg:max-w-5xl' : wide ? 'max-w-2xl' : 'max-w-md'} overflow-y-auto rounded-2xl border border-ink-700/80 p-5 shadow-2xl`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-start justify-between gap-3">

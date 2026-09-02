@@ -1,4 +1,5 @@
 import { inLibrary } from '../routes/sources';
+import { getSource } from './sources';
 
 const API = 'https://api.mangadex.org';
 const HEADERS = { 'user-agent': 'Uchiyomi/1.0 (self-hosted personal reader)' };
@@ -34,17 +35,31 @@ export const TAG_MAP: Record<string, string> = {
   Villainess: 'd14322ac-4d6f-4e9b-afd9-629d5f4d8a41',
 };
 
+export const AVAILABLE_LANGUAGES = [
+  { id: 'all', label: 'All Languages' },
+  { id: 'en', label: '🇬🇧 English' },
+  { id: 'ar', label: '🇸🇦 Arabic' },
+  { id: 'es', label: '🇪🇸 Spanish' },
+  { id: 'fr', label: '🇫🇷 French' },
+  { id: 'ja', label: '🇯🇵 Japanese' },
+  { id: 'ko', label: '🇰🇷 Korean' },
+  { id: 'zh', label: '🇨🇳 Chinese' },
+];
+
 export interface ExploreParams {
   genre?: string;
   tag?: string;
   format?: 'all' | 'manhwa' | 'manga' | 'manhua';
   sort?: 'trending' | 'rating' | 'latest';
+  lang?: string;
+  source?: string;
   q?: string;
   page?: number;
 }
 
 export interface ExploreItem {
   id: string;
+  source?: string;
   title: string;
   coverUrl?: string;
   summary?: string;
@@ -72,6 +87,49 @@ export async function exploreManga(params: ExploreParams): Promise<ExploreItem[]
     return hit.items;
   }
 
+  // If a specific non-MangaDex provider is selected, query that provider directly
+  if (params.source && params.source !== 'all' && params.source !== 'mangadex') {
+    const src = getSource(params.source);
+    if (src) {
+      try {
+        let results: any[] = [];
+        if (params.q?.trim()) {
+          results = await src.search(params.q.trim());
+        } else if (params.genre && params.genre !== 'all') {
+          results = await src.search(params.genre);
+        } else if (params.sort === 'latest' && src.latest) {
+          results = await src.latest(page);
+        } else if (src.popular) {
+          results = await src.popular(page);
+        } else {
+          results = await src.search('manga');
+        }
+
+        const items: ExploreItem[] = results.map((r) => ({
+          id: r.sourceId,
+          source: params.source,
+          title: r.title,
+          coverUrl: r.coverUrl,
+          summary: r.summary,
+          genres: r.genres || [],
+          status: r.status,
+          format: params.format !== 'all' ? params.format : undefined,
+        }));
+
+        const titles = items.map((it) => it.title);
+        const haveSet = await inLibrary(titles).catch(() => new Set<string>());
+        items.forEach((it) => {
+          it.inLibrary = haveSet.has(it.title.toLowerCase().replace(/[^a-z0-9]+/g, ''));
+        });
+
+        exploreCache.set(cacheKey, { at: Date.now(), items });
+        return items;
+      } catch (e) {
+        // fallback to mangadex if specific source query fails
+      }
+    }
+  }
+
   const queryParts: string[] = [
     `limit=24`,
     `offset=${(page - 1) * 24}`,
@@ -82,6 +140,11 @@ export async function exploreManga(params: ExploreParams): Promise<ExploreItem[]
 
   if (params.q?.trim()) {
     queryParts.push(`title=${encodeURIComponent(params.q.trim())}`);
+  }
+
+  // Translated language filter
+  if (params.lang && params.lang !== 'all') {
+    queryParts.push(`availableTranslatedLanguage[]=${encodeURIComponent(params.lang)}`);
   }
 
   // Format mapping to originalLanguage
@@ -147,6 +210,7 @@ export async function exploreManga(params: ExploreParams): Promise<ExploreItem[]
 
     return {
       id: m.id,
+      source: 'mangadex',
       title,
       summary: firstLang(a.description),
       genres,

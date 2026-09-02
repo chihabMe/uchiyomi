@@ -28,6 +28,18 @@ interface SearchGroup { title: string; coverUrl?: string; inLibrary?: boolean; u
  */
 const HERO_SLIDES = 10;
 
+
+const AVAILABLE_LANGUAGES = [
+  { id: "all", label: "🌐 All Languages" },
+  { id: "en", label: "🇬🇧 English" },
+  { id: "ar", label: "🇸🇦 Arabic" },
+  { id: "es", label: "🇪🇸 Spanish" },
+  { id: "fr", label: "🇫🇷 French" },
+  { id: "ja", label: "🇯🇵 Japanese" },
+  { id: "ko", label: "🇰🇷 Korean" },
+  { id: "zh", label: "🇨🇳 Chinese" },
+];
+
 const POPULAR_GENRES = [
   { id: 'all', label: 'All' },
   { id: 'Action', label: '⚔️ Action' },
@@ -92,6 +104,8 @@ export default function DiscoverPage() {
   const [selectedGenre, setSelectedGenre] = useState<string>('all');
   const [selectedFormat, setSelectedFormat] = useState<'all' | 'manhwa' | 'manga' | 'manhua'>('all');
   const [selectedSort, setSelectedSort] = useState<'trending' | 'rating' | 'latest'>('trending');
+  const [selectedLang, setSelectedLang] = useState<string>('all');
+  const [selectedProvider, setSelectedProvider] = useState<string>('all');
   const [listMode, setListMode] = useState<ListMode>('newest');
   const [selected, setSelected] = useState<string | null>(null);
   const [q, setQ] = useState('');
@@ -105,7 +119,7 @@ export default function DiscoverPage() {
   const [added, setAdded] = useState<Set<string>>(new Set());
 
   const { data: exploreData, isLoading: exploreLoading } = useQuery({
-    queryKey: ['discover-explore', selectedGenre, selectedFormat, selectedSort, page],
+    queryKey: ['discover-explore', selectedGenre, selectedFormat, selectedSort, selectedLang, selectedProvider, page],
     queryFn: async () => {
       const gItem = POPULAR_GENRES.find((x) => x.id === selectedGenre);
       const genreParam = gItem && !gItem.tag && gItem.id !== 'all' ? gItem.id : '';
@@ -115,6 +129,8 @@ export default function DiscoverPage() {
         ...(tagParam ? { tag: tagParam } : {}),
         ...(selectedFormat !== 'all' ? { format: selectedFormat } : {}),
         ...(selectedSort ? { sort: selectedSort } : {}),
+        ...(selectedLang !== 'all' ? { lang: selectedLang } : {}),
+        ...(selectedProvider !== 'all' ? { source: selectedProvider } : {}),
         page: String(page),
       });
       return api<{ content: Array<{ id: string; title: string; coverUrl?: string; summary?: string; genres: string[]; format?: string; inLibrary?: boolean }> }>(
@@ -240,6 +256,8 @@ export default function DiscoverPage() {
     setSelectedGenre('all');
     setSelectedFormat('all');
     setSelectedSort('trending');
+    setSelectedLang('all');
+    setSelectedProvider('all');
     setMode('newest');
     setSearchHits([]);
   };
@@ -409,24 +427,69 @@ export default function DiscoverPage() {
             ))}
           </div>
 
-          <div className="flex items-center gap-2">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-fog-500">{tr('Sort')}:</span>
-            <select
-              value={selectedSort}
-              onChange={(e) => {
-                const s = e.target.value as any;
-                setSelectedSort(s);
-                setPage(1);
-                if (s !== 'trending' || selectedGenre !== 'all' || selectedFormat !== 'all') setMode('explore');
-              }}
-              className="rounded-lg border border-ink-700 bg-ink-900 px-2.5 py-1 text-xs text-fog-200 outline-none focus:border-accent"
-            >
-              <option value="trending">🔥 {tr('Trending')}</option>
-              <option value="rating">⭐ {tr('Top Rated')}</option>
-              <option value="latest">🆕 {tr('New Chapters')}</option>
-            </select>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Language filter */}
+            <div className="flex items-center gap-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-fog-500">{tr('Lang')}:</span>
+              <select
+                value={selectedLang}
+                onChange={(e) => {
+                  const l = e.target.value;
+                  setSelectedLang(l);
+                  setPage(1);
+                  if (l !== 'all') setMode('explore');
+                  else if (selectedGenre === 'all' && selectedFormat === 'all' && selectedSort === 'trending' && selectedProvider === 'all') setMode('newest');
+                }}
+                className="rounded-lg border border-ink-700 bg-ink-900 px-2 py-1 text-xs text-fog-200 outline-none focus:border-accent"
+              >
+                {AVAILABLE_LANGUAGES.map((l) => (
+                  <option key={l.id} value={l.id}>{l.label}</option>
+                ))}
+              </select>
+            </div>
 
-            {(selectedGenre !== 'all' || selectedFormat !== 'all' || selectedSort !== 'trending') && (
+            {/* Provider filter */}
+            <div className="flex items-center gap-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-fog-500">{tr('Source')}:</span>
+              <select
+                value={selectedProvider}
+                onChange={(e) => {
+                  const p = e.target.value;
+                  setSelectedProvider(p);
+                  setPage(1);
+                  if (p !== 'all') setMode('explore');
+                  else if (selectedGenre === 'all' && selectedFormat === 'all' && selectedSort === 'trending' && selectedLang === 'all') setMode('newest');
+                }}
+                className="rounded-lg border border-ink-700 bg-ink-900 px-2 py-1 text-xs text-fog-200 outline-none focus:border-accent"
+              >
+                <option value="all">⚡ {tr('All Sources')}</option>
+                <option value="mangadex">🟣 MangaDex</option>
+                {sources.map((s) => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Sort filter */}
+            <div className="flex items-center gap-1">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-fog-500">{tr('Sort')}:</span>
+              <select
+                value={selectedSort}
+                onChange={(e) => {
+                  const s = e.target.value as any;
+                  setSelectedSort(s);
+                  setPage(1);
+                  if (s !== 'trending' || selectedGenre !== 'all' || selectedFormat !== 'all' || selectedLang !== 'all' || selectedProvider !== 'all') setMode('explore');
+                }}
+                className="rounded-lg border border-ink-700 bg-ink-900 px-2 py-1 text-xs text-fog-200 outline-none focus:border-accent"
+              >
+                <option value="trending">🔥 {tr('Trending')}</option>
+                <option value="rating">⭐ {tr('Top Rated')}</option>
+                <option value="latest">🆕 {tr('New Chapters')}</option>
+              </select>
+            </div>
+
+            {(selectedGenre !== 'all' || selectedFormat !== 'all' || selectedSort !== 'trending' || selectedLang !== 'all' || selectedProvider !== 'all') && (
               <button
                 onClick={backToNewest}
                 className="chip text-[11px] py-1 px-2 text-fog-400 hover:text-white"
