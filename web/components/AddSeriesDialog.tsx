@@ -13,7 +13,15 @@ import { IcCheck, IcChevronLeft, IcSearch } from '@/components/icons';
 import { t as tr } from '@/lib/i18n';
 
 export interface Provider { source: string; name: string; sourceId: string; title: string; coverUrl?: string }
-export interface ChapterItem { sourceId?: string; number: number; name?: string; date?: string | null }
+export interface ChapterItem {
+  sourceId?: string;
+  number: number;
+  name?: string;
+  date?: string | null;
+  fromSourceName?: string;
+  fromSourceId?: string;
+  fromSeriesId?: string;
+}
 interface Detail {
   source: string; sourceId: string; title: string; summary: string; coverUrl: string | null;
   genres: string[]; status: string; count: number; first: number | null; last: number | null;
@@ -216,6 +224,74 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
     setMode('custom');
   };
 
+  const [autofilling, setAutofilling] = useState(false);
+  const autofillMissingChapters = async () => {
+    if (!picked || !detail?.chapters) return;
+    setAutofilling(true);
+    try {
+      let candidateProviders = (providers || []).filter((p) => p.source !== picked.source || p.sourceId !== picked.sourceId);
+      if (candidateProviders.length === 0) {
+        const qParams = new URLSearchParams({ q: detail.title || title, ...(sources.length ? { sources: sources.join(',') } : {}) });
+        const res = await api<{ content: Provider[] }>(`/api/sources/find?${qParams.toString()}`);
+        candidateProviders = (res.content || []).filter((p) => p.source !== picked.source || p.sourceId !== picked.sourceId);
+        if (res.content?.length) setProviders(res.content);
+      }
+
+      if (candidateProviders.length === 0) {
+        toast(tr('No other sources found for this title.'), 'info');
+        setAutofilling(false);
+        return;
+      }
+
+      const existingNums = new Set(detail.chapters.map((c) => c.number));
+      const merged = [...detail.chapters];
+      let added = 0;
+
+      for (const prov of candidateProviders.slice(0, 3)) {
+        try {
+          const provDetail = await api<Detail>(`/api/sources/detail?source=${encodeURIComponent(prov.source)}&sourceId=${encodeURIComponent(prov.sourceId)}`);
+          for (const ch of provDetail.chapters || []) {
+            if (!existingNums.has(ch.number)) {
+              existingNums.add(ch.number);
+              merged.push({
+                ...ch,
+                fromSourceName: prov.name,
+                fromSourceId: prov.source,
+                fromSeriesId: prov.sourceId,
+              });
+              added++;
+            }
+          }
+        } catch {
+          // ignore single provider failure
+        }
+      }
+
+      if (added > 0) {
+        merged.sort((a, b) => a.number - b.number);
+        setDetail({
+          ...detail,
+          chapters: merged,
+          count: merged.length,
+          first: merged[0]?.number ?? detail.first,
+          last: merged[merged.length - 1]?.number ?? detail.last,
+        });
+        setSelectedChapters((prev) => {
+          const next = new Set(prev);
+          merged.forEach((c) => next.add(c.number));
+          return next;
+        });
+        toast(tr('Filled {n} missing chapter(s) from other sources!', { n: added }), 'success');
+      } else {
+        toast(tr('Other sources did not have the missing chapters either.'), 'info');
+      }
+    } catch {
+      toast(tr('Failed to autofill chapters from other sources.'), 'error');
+    } finally {
+      setAutofilling(false);
+    }
+  };
+
   const openStreamReader = (c?: ChapterItem) => {
     if (!picked || !detail) return;
     const target = c || (detail.chapters && [...detail.chapters].sort((a, b) => a.number - b.number)[0]);
@@ -223,10 +299,12 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
       toast(tr('No chapters available to read.'), 'error');
       return;
     }
+    const targetSource = target.fromSourceId || picked.source;
+    const targetSeriesId = target.fromSeriesId || picked.sourceId;
     const chId = target.sourceId || String(target.number);
     onClose();
     router.push(
-      `/reader/?source=${encodeURIComponent(picked.source)}&chapterId=${encodeURIComponent(chId)}&seriesId=${encodeURIComponent(picked.sourceId)}&number=${target.number}&title=${encodeURIComponent(target.name || `Chapter ${target.number}`)}&seriesTitle=${encodeURIComponent(detail.title || picked.title)}`
+      `/reader/?source=${encodeURIComponent(targetSource)}&chapterId=${encodeURIComponent(chId)}&seriesId=${encodeURIComponent(targetSeriesId)}&number=${target.number}&title=${encodeURIComponent(target.name || `Chapter ${target.number}`)}&seriesTitle=${encodeURIComponent(detail.title || picked.title)}`
     );
   };
 
@@ -468,20 +546,32 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
 
             {/* Missing Chapter Gap Alert */}
             {detectedGaps.length > 0 && (
-              <div className="mt-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-200 flex items-start gap-2">
-                <span className="text-amber-400 mt-0.5">⚠️</span>
-                <div className="flex-1">
-                  <p className="font-semibold text-amber-100">
-                    {tr('Sequence gaps detected on {name}', { name: picked.name })}
-                  </p>
-                  <p className="text-[11px] text-amber-200/80 mt-0.5">
-                    {tr('Missing chapters:')} {detectedGaps.map((g) => (g.from === g.to ? `Ch. ${g.from}` : `Ch. ${g.from}–${g.to}`)).join(', ')}.
-                    {providers && providers.length > 1 && (
-                      <span className="ml-1 underline cursor-pointer hover:text-white" onClick={() => { setPicked(null); setDetail(null); }}>
-                        {tr('Try another source')}
-                      </span>
-                    )}
-                  </p>
+              <div className="mt-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-200">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-2 flex-1">
+                    <span className="text-amber-400 mt-0.5">⚠️</span>
+                    <div>
+                      <p className="font-semibold text-amber-100">
+                        {tr('Sequence gaps detected on {name}', { name: picked.name })}
+                      </p>
+                      <p className="text-[11px] text-amber-200/80 mt-0.5">
+                        {tr('Missing chapters:')} {detectedGaps.map((g) => (g.from === g.to ? `Ch. ${g.from}` : `Ch. ${g.from}–${g.to}`)).join(', ')}.
+                        {providers && providers.length > 1 && (
+                          <span className="ml-1 underline cursor-pointer hover:text-white" onClick={() => { setPicked(null); setDetail(null); }}>
+                            {tr('Try another source')}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={autofilling}
+                    onClick={autofillMissingChapters}
+                    className="chip py-1.5 px-3 text-xs font-semibold bg-amber-500/20 text-amber-200 border-amber-500/50 hover:bg-amber-500 hover:text-black transition shrink-0 shadow-sm"
+                  >
+                    {autofilling ? tr('Searching…') : tr('⚡ Autofill missing chapters')}
+                  </button>
                 </div>
               </div>
             )}
@@ -695,6 +785,11 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
                         <span className="truncate text-xs text-fog-300">
                           {c.name || `Chapter ${c.number}`}
                         </span>
+                        {c.fromSourceName && (
+                          <span className="rounded-md bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300 border border-emerald-500/40 shrink-0">
+                            ⚡ {c.fromSourceName}
+                          </span>
+                        )}
                         {c.date && (
                           <span className="hidden sm:inline text-[10px] text-fog-500 shrink-0 font-mono">
                             {c.date.slice(0, 10)}
