@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import { getSource } from '../lib/sources';
 import { cfSession } from '../lib/sources/flaresolverr';
-import { userIdOf, roleOf } from '../lib/auth';
+import { authenticate, userIdOf, roleOf } from '../lib/auth';
 import { viewCtxFor, sourceAllowedFor, hideAdult, type ViewCtx } from '../lib/visibility';
 
 interface StreamSession {
@@ -40,6 +40,12 @@ function pruneCache() {
 }
 
 export async function streamRoutes(app: FastifyInstance) {
+  app.addHook('preHandler', async (req, reply) => {
+    if (req.url.startsWith('/api/stream')) {
+      await authenticate(req, reply);
+    }
+  });
+
   // 1. Initialise a streaming session for a chapter
   app.get('/api/stream/chapter', async (req: FastifyRequest, reply: FastifyReply) => {
     const { source, chapterId, seriesId, number, title, seriesTitle } = req.query as {
