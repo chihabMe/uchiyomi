@@ -132,9 +132,38 @@ export function makeSuwayomiAdapter(remote: RemoteSource, run: Gql = defaultGql)
     const list = d?.fetchSourceManga?.mangas;
     if (!Array.isArray(list)) return [];
     const seen = new Set<string>();
-    return list
+    const items = list
       .map((m) => toSeries(m, adapterId))
       .filter((s): s is SourceSeries => !!s && (seen.has(s.sourceId) ? false : (seen.add(s.sourceId), true)));
+
+    // Concurrently enrich mangas with chapter count & latest chapter
+    await Promise.allSettled(
+      items.slice(0, 18).map(async (s) => {
+        try {
+          const res = await run<{ fetchChapters: { chapters: RemoteChapter[] } }>(
+            FETCH_CHAPTERS,
+            { mangaId: Number(s.sourceId) },
+            4000
+          );
+          const chs = res?.fetchChapters?.chapters;
+          if (Array.isArray(chs) && chs.length > 0) {
+            s.chapterCount = chs.length;
+            const validNums = chs
+              .map((c) => (typeof c.chapterNumber === 'number' ? c.chapterNumber : NaN))
+              .filter(Number.isFinite);
+            if (validNums.length > 0) {
+              s.latestChapter = String(Math.max(...validNums));
+            } else {
+              s.latestChapter = String(chs.length);
+            }
+          }
+        } catch {
+          // ignore chapter lookup failure
+        }
+      })
+    );
+
+    return items;
   };
 
   const adapter: SourceAdapter = {

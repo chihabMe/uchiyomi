@@ -222,21 +222,21 @@ export function SourceCard({ item, sourceName, onAdd, eager }: {
           fallbackSrc={item.coverUrl || undefined}
           className="h-full w-full" imgClassName="transition-transform duration-500 group-hover:scale-[1.07]" />
 
+        {/* Chapter count / Latest chapter badge ON TOP OF THE COVER before clicking! */}
+        {(item.latestChapter || item.chapterCount) && (
+          <span className="absolute start-1.5 top-1.5 z-20 rounded-md bg-ink-950/90 px-1.5 py-0.5 text-[10px] font-mono font-bold text-accent backdrop-blur border border-accent/40 shadow-glow">
+            {item.latestChapter ? `Ch. ${item.latestChapter}` : `${item.chapterCount} ch`}
+          </span>
+        )}
+
         {sourceName && (
-          <span className="absolute end-1.5 top-1.5 z-10 max-w-[85%] truncate rounded-md bg-ink-950/80 px-1.5 py-0.5 text-[10px] font-medium text-fog-200 backdrop-blur">
+          <span className="absolute end-1.5 top-1.5 z-10 max-w-[55%] truncate rounded-md bg-ink-950/80 px-1.5 py-0.5 text-[10px] font-medium text-fog-200 backdrop-blur">
             {sourceName}
           </span>
         )}
         {(item.providerCount ?? 0) > 1 && !owned && (
-          <span className="absolute start-1.5 top-1.5 z-10 rounded-md bg-ink-950/80 px-1.5 py-0.5 text-[10px] font-semibold text-accent backdrop-blur">
-            {item.providerCount}
-          </span>
-        )}
-
-        {/* Chapter count / Latest chapter badge on the cover before clicking! */}
-        {(item.latestChapter || item.chapterCount) && !owned && (
-          <span className="absolute start-1.5 bottom-1.5 z-10 rounded-md bg-ink-950/85 px-1.5 py-0.5 text-[10px] font-mono font-bold text-fog-100 backdrop-blur border border-ink-700/60 shadow-md">
-            {item.latestChapter ? `Ch. ${item.latestChapter}` : `${item.chapterCount} ch`}
+          <span className="absolute start-1.5 bottom-1.5 z-10 rounded-md bg-ink-950/80 px-1.5 py-0.5 text-[10px] font-semibold text-accent backdrop-blur">
+            {item.providerCount} src
           </span>
         )}
 
