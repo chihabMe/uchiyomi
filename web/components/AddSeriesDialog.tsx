@@ -100,14 +100,11 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
 
   const { data: jobs } = useQuery({
     queryKey: ['source-jobs'],
-    queryFn: () => api<{ content: Job[] }>('/api/sources/jobs').then((r) => r.content),
-    enabled: Boolean(done && done.chapters > 0),
-    refetchInterval: (q) => {
-      const active = q.state.data?.find((j) => done && j.folder === done.folder);
-      return active && active.status !== 'done' && active.status !== 'failed' ? 1000 : false;
-    },
+    queryFn: () => api<{ content: Job[] }>('/api/sources/jobs'),
+    enabled: !!done,
+    refetchInterval: 2000,
   });
-  const job = done ? jobs?.find((j) => j.folder === done.folder) : undefined;
+  const job = done ? (jobs?.content ?? []).find((j) => j.folder === done.folder) : undefined;
 
   // Filtered & sorted chapter list
   const filteredChapters = useMemo(() => {
