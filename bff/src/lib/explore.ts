@@ -67,6 +67,8 @@ export interface ExploreItem {
   status?: string;
   format?: 'manhwa' | 'manga' | 'manhua';
   rating?: number;
+  chapterCount?: number;
+  latestChapter?: string;
   inLibrary?: boolean;
 }
 
@@ -113,6 +115,8 @@ export async function exploreManga(params: ExploreParams): Promise<ExploreItem[]
           summary: r.summary,
           genres: r.genres || [],
           status: r.status,
+          chapterCount: r.chapterCount,
+          latestChapter: r.latestChapter,
           format: params.format !== 'all' ? params.format : undefined,
         }));
 
@@ -142,9 +146,13 @@ export async function exploreManga(params: ExploreParams): Promise<ExploreItem[]
     queryParts.push(`title=${encodeURIComponent(params.q.trim())}`);
   }
 
-  // Translated language filter
+  // Translated language filter:
+  // If specific language is chosen (and not 'all'), enforce it.
+  // If no language is provided, default to English so users aren't shown dead titles with 0 translated chapters!
   if (params.lang && params.lang !== 'all') {
     queryParts.push(`availableTranslatedLanguage[]=${encodeURIComponent(params.lang)}`);
+  } else if (!params.lang) {
+    queryParts.push(`availableTranslatedLanguage[]=en`);
   }
 
   // Format mapping to originalLanguage
@@ -190,45 +198,80 @@ export async function exploreManga(params: ExploreParams): Promise<ExploreItem[]
   const data = (await res.json()) as any;
   const rawList: any[] = data?.data || [];
 
-  const items: ExploreItem[] = rawList.map((m) => {
-    const a = m.attributes || {};
-    const cover = (m.relationships || []).find((r: any) => r.type === 'cover_art');
-    const genres = (a.tags || [])
-      .filter((t: any) => ['genre', 'theme'].includes(t.attributes?.group))
-      .map((t: any) => firstLang(t.attributes?.name))
-      .filter(Boolean);
+  const items: ExploreItem[] = await Promise.all(
+    rawList.map(async (m) => {
+      const a = m.attributes || {};
+      const cover = (m.relationships || []).find((r: any) => r.type === 'cover_art');
+      const genres = (a.tags || [])
+        .filter((t: any) => ['genre', 'theme'].includes(t.attributes?.group))
+        .map((t: any) => firstLang(t.attributes?.name))
+        .filter(Boolean);
 
-    let format: 'manhwa' | 'manga' | 'manhua' | undefined;
-    if (a.originalLanguage === 'ko') format = 'manhwa';
-    else if (a.originalLanguage === 'ja') format = 'manga';
-    else if (a.originalLanguage === 'zh') format = 'manhua';
+      let format: 'manhwa' | 'manga' | 'manhua' | undefined;
+      if (a.originalLanguage === 'ko') format = 'manhwa';
+      else if (a.originalLanguage === 'ja') format = 'manga';
+      else if (a.originalLanguage === 'zh') format = 'manhua';
 
-    const title =
-      firstLang(a.title) ||
-      (a.altTitles || []).map((t: any) => t.en || firstLang(t)).find(Boolean) ||
-      'Untitled';
+      const title =
+        firstLang(a.title) ||
+        (a.altTitles || []).map((t: any) => t.en || firstLang(t)).find(Boolean) ||
+        'Untitled';
 
-    return {
-      id: m.id,
-      source: 'mangadex',
-      title,
-      summary: firstLang(a.description),
-      genres,
-      status: a.status ? String(a.status).toUpperCase() : undefined,
-      format,
-      coverUrl: cover?.attributes?.fileName
-        ? `https://uploads.mangadex.org/covers/${m.id}/${cover.attributes.fileName}.256.jpg`
-        : undefined,
-    };
-  });
+      let latestChapter: string | undefined = a.lastChapter && a.lastChapter.trim() ? a.lastChapter.trim() : undefined;
+      let chapterCount: number | undefined = latestChapter && !isNaN(parseFloat(latestChapter)) ? parseFloat(latestChapter) : undefined;
+
+      if (!latestChapter) {
+        try {
+          const langParam = params.lang && params.lang !== 'all' ? `?translatedLanguage[]=${encodeURIComponent(params.lang)}` : '?translatedLanguage[]=en';
+          const aggRes = await fetch(`${API}/manga/${m.id}/aggregate${langParam}`, { headers: HEADERS, signal: AbortSignal.timeout(5000) });
+          if (aggRes.ok) {
+            const agg = (await aggRes.json()) as any;
+            let total = 0;
+            let maxCh = 0;
+            for (const v of Object.values(agg.volumes || {}) as any[]) {
+              for (const [ckey] of Object.entries(v.chapters || {})) {
+                total++;
+                const cnum = parseFloat(ckey);
+                if (!isNaN(cnum) && cnum > maxCh) maxCh = cnum;
+              }
+            }
+            if (total > 0) {
+              chapterCount = total;
+              latestChapter = String(maxCh);
+            }
+          }
+        } catch {
+          // ignore aggregate lookup failure
+        }
+      }
+
+      return {
+        id: m.id,
+        source: 'mangadex',
+        title,
+        summary: firstLang(a.description),
+        genres,
+        status: a.status ? String(a.status).toUpperCase() : undefined,
+        format,
+        chapterCount,
+        latestChapter,
+        coverUrl: cover?.attributes?.fileName
+          ? `https://uploads.mangadex.org/covers/${m.id}/${cover.attributes.fileName}.256.jpg`
+          : undefined,
+      };
+    })
+  );
+
+  // Filter out any manga that has 0 chapters
+  const validItems = items.filter((it) => (it.chapterCount ?? 0) > 0 || it.latestChapter != null);
 
   // Check which titles are in the local library
-  const titles = items.map((it) => it.title);
+  const titles = validItems.map((it) => it.title);
   const haveSet = await inLibrary(titles).catch(() => new Set<string>());
-  items.forEach((it) => {
+  validItems.forEach((it) => {
     it.inLibrary = haveSet.has(it.title.toLowerCase().replace(/[^a-z0-9]+/g, ''));
   });
 
-  exploreCache.set(cacheKey, { at: Date.now(), items });
-  return items;
+  exploreCache.set(cacheKey, { at: Date.now(), items: validItems });
+  return validItems;
 }

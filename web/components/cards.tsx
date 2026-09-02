@@ -73,6 +73,11 @@ export function SeriesCard({ series, w = 'w-32', eager = false }: { series: Seri
         {(series.yomi?.newCount ?? 0) > 0 && (
           <span className="absolute bottom-2 left-2 z-10 rounded-full bg-accent px-2 py-0.5 text-[10px] font-bold tracking-wide text-black shadow-glow">NEW</span>
         )}
+        {series.booksCount != null && series.booksCount > 0 && (
+          <span className="absolute left-2 bottom-2 z-10 rounded-md bg-ink-950/85 px-1.5 py-0.5 text-[10px] font-mono font-bold text-fog-100 backdrop-blur border border-ink-700/60 shadow-md">
+            {series.booksCount} ch
+          </span>
+        )}
         <div className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-black/85 to-transparent" />
       </div>
       <p className="mt-2 line-clamp-2 px-0.5 text-[13px] font-medium leading-tight text-fog-200 transition group-hover:text-fog-50">
@@ -147,6 +152,11 @@ export function SeriesTile({ series, eager = false, selectable, selected, onTogg
         {(series.yomi?.newCount ?? 0) > 0 && (
           <span className="absolute bottom-1.5 left-1.5 z-10 rounded-full bg-accent px-1.5 py-0.5 text-[9px] font-bold text-black">NEW</span>
         )}
+        {series.booksCount != null && series.booksCount > 0 && (
+          <span className="absolute start-1.5 bottom-1.5 z-10 rounded-md bg-ink-950/85 px-1.5 py-0.5 text-[9px] font-mono font-bold text-fog-100 backdrop-blur border border-ink-700/60 shadow-md">
+            {series.booksCount} ch
+          </span>
+        )}
       </div>
       <p className="mt-1.5 line-clamp-2 text-xs font-medium leading-tight text-fog-300 transition group-hover:text-fog-100">
         {series.metadata?.title || series.name}
@@ -176,6 +186,8 @@ export interface SourceItem {
   inLibrary?: boolean;
   /** >1 when the same title was found on several sources. */
   providerCount?: number;
+  chapterCount?: number | string;
+  latestChapter?: string;
 }
 
 /**
@@ -218,6 +230,13 @@ export function SourceCard({ item, sourceName, onAdd, eager }: {
         {(item.providerCount ?? 0) > 1 && !owned && (
           <span className="absolute start-1.5 top-1.5 z-10 rounded-md bg-ink-950/80 px-1.5 py-0.5 text-[10px] font-semibold text-accent backdrop-blur">
             {item.providerCount}
+          </span>
+        )}
+
+        {/* Chapter count / Latest chapter badge on the cover before clicking! */}
+        {(item.latestChapter || item.chapterCount) && !owned && (
+          <span className="absolute start-1.5 bottom-1.5 z-10 rounded-md bg-ink-950/85 px-1.5 py-0.5 text-[10px] font-mono font-bold text-fog-100 backdrop-blur border border-ink-700/60 shadow-md">
+            {item.latestChapter ? `Ch. ${item.latestChapter}` : `${item.chapterCount} ch`}
           </span>
         )}
 

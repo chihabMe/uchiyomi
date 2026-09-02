@@ -36,6 +36,8 @@ function toSeries(m: any): SourceSeries {
     coverUrl: cover?.attributes?.fileName ? `https://uploads.mangadex.org/covers/${m.id}/${cover.attributes.fileName}` : undefined,
     url: `https://mangadex.org/title/${m.id}`,
     updatedAt: a.updatedAt || a.createdAt || undefined,
+    latestChapter: a.lastChapter ? String(a.lastChapter).trim() : undefined,
+    chapterCount: a.lastChapter && !isNaN(parseFloat(a.lastChapter)) ? parseFloat(a.lastChapter) : undefined,
   };
 }
 
@@ -79,6 +81,7 @@ export const mangadex: SourceAdapter = {
     const all: SourceChapter[] = [];
     let offset = 0;
     let total = Infinity;
+    // Try English first
     while (offset < total) {
       const j = await jget(`${API}/manga/${seriesId}/feed?translatedLanguage[]=en&order[chapter]=asc&order[volume]=asc&limit=500&offset=${offset}&${RATINGS}`);
       total = j.total ?? 0;
@@ -90,6 +93,24 @@ export const mangadex: SourceAdapter = {
       offset += 500;
       if (!j.data?.length) break;
     }
+
+    // Fallback: If 0 English chapters found, query any translated language so titles are never stranded with 0 chapters
+    if (all.length === 0) {
+      offset = 0;
+      total = Infinity;
+      while (offset < total) {
+        const j = await jget(`${API}/manga/${seriesId}/feed?order[chapter]=asc&order[volume]=asc&limit=500&offset=${offset}&${RATINGS}`);
+        total = j.total ?? 0;
+        for (const c of j.data || []) {
+          const num = parseFloat(c.attributes?.chapter);
+          if (Number.isNaN(num)) continue;
+          all.push({ sourceId: c.id, number: num, title: c.attributes?.title || undefined, lang: c.attributes?.translatedLanguage, pages: c.attributes?.pages, publishedAt: c.attributes?.publishAt || c.attributes?.readableAt || undefined });
+        }
+        offset += 500;
+        if (!j.data?.length) break;
+      }
+    }
+
     // one entry per chapter number, preferring hosted chapters (pages>0) over external/licensed (pages=0)
     const byNum = new Map<number, SourceChapter>();
     for (const c of all) {

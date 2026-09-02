@@ -11,6 +11,8 @@ export interface SourceSeries {
   coverUrl?: string; // remote cover image
   url?: string; // canonical web url
   updatedAt?: string; // ISO timestamp of the source's last update to this series (when the source exposes it)
+  chapterCount?: number;
+  latestChapter?: string;
 }
 
 export interface SourceChapter {

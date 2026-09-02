@@ -95,12 +95,19 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
         }
         if (d.chapters?.length) {
           setSelectedChapters(new Set(d.chapters.map((c) => c.number)));
+        } else if (d.count === 0) {
+          const qParams = new URLSearchParams({ q: d.title || title, ...(sources.length ? { sources: sources.join(',') } : {}) });
+          api<{ content: Provider[] }>(`/api/sources/find?${qParams.toString()}`).then((res) => {
+            if (res.content && res.content.length > 1) {
+              setProviders(res.content);
+            }
+          }).catch(() => {});
         }
       })
       .catch((e) => { if (ok) toast(msgOf(e, tr('Could not load source details.')), 'error'); })
       .finally(() => { if (ok) setLoading(false); });
     return () => { ok = false; };
-  }, [picked, toast]);
+  }, [picked, toast, sources, title]);
 
   const { data: jobs } = useQuery({
     queryKey: ['source-jobs'],
@@ -476,6 +483,40 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
                     )}
                   </p>
                 </div>
+              </div>
+            )}
+
+            {/* Zero Chapters Alert with Provider Switcher */}
+            {detail.count === 0 && (
+              <div className="mt-3 rounded-xl border border-rose-500/40 bg-rose-500/10 p-3 text-xs text-rose-200">
+                <div className="flex items-center gap-2 font-semibold text-rose-100">
+                  <span>⚠️</span>
+                  <span>{tr('No readable chapters available on {name}', { name: picked.name })}</span>
+                </div>
+                <p className="mt-1 text-[11px] text-rose-200/80 leading-relaxed">
+                  {tr('This source either requires external licensing or does not host chapters for this title.')}
+                  {providers && providers.length > 1 ? (
+                    <span className="block mt-1 font-medium text-white">
+                      {tr('Found {n} other provider(s) for this series. Switch to one below:', { n: providers.length - 1 })}
+                    </span>
+                  ) : null}
+                </p>
+                {providers && providers.length > 1 && (
+                  <div className="flex flex-wrap gap-2 mt-2 pt-2 border-t border-rose-500/20">
+                    {providers
+                      .filter((p) => p.source !== picked.source || p.sourceId !== picked.sourceId)
+                      .map((p) => (
+                        <button
+                          key={`${p.source}:${p.sourceId}`}
+                          type="button"
+                          onClick={() => { setPicked(p); setDetail(null); }}
+                          className="chip py-1 px-2.5 text-xs font-semibold bg-ink-900 border-accent/40 text-accent hover:bg-accent hover:text-white transition"
+                        >
+                          ⚡ {tr('Switch to {name}', { name: p.name })}
+                        </button>
+                      ))}
+                  </div>
+                )}
               </div>
             )}
 

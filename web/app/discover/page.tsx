@@ -133,7 +133,7 @@ export default function DiscoverPage() {
         ...(selectedProvider !== 'all' ? { source: selectedProvider } : {}),
         page: String(page),
       });
-      return api<{ content: Array<{ id: string; title: string; coverUrl?: string; summary?: string; genres: string[]; format?: string; inLibrary?: boolean }> }>(
+      return api<{ content: Array<{ id: string; source?: string; title: string; coverUrl?: string; summary?: string; genres: string[]; format?: string; chapterCount?: number; latestChapter?: string; inLibrary?: boolean }> }>(
         `/api/discover/explore?${qParams.toString()}`
       );
     },
@@ -205,12 +205,14 @@ export default function DiscoverPage() {
     if (mode === 'search') return searchHits;
     if (mode === 'explore') {
       return (exploreData?.content ?? []).map((m) => ({
-        source: 'mangadex',
+        source: m.source || 'mangadex',
         sourceId: m.id,
         title: m.title,
         coverUrl: m.coverUrl,
         inLibrary: m.inLibrary,
         updatedAt: m.format?.toUpperCase(),
+        chapterCount: m.chapterCount,
+        latestChapter: m.latestChapter,
       }));
     }
     const seen = new Set<string>();
