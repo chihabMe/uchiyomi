@@ -19,8 +19,26 @@ import { IcChevronLeft, IcChevronRight, IcSliders } from '@/components/icons';
 import { t as tr } from '@/lib/i18n';
 
 interface PageDim { number: number; width: number | null; height: number | null }
-interface Chapter { id: string; seriesId: string; seriesTitle: string; title: string; pages: PageDim[]; offline: boolean }
-interface ChapterRef { id: string; label: string }
+interface Chapter {
+  id: string;
+  seriesId: string;
+  seriesTitle: string;
+  title: string;
+  pages: PageDim[];
+  offline: boolean;
+  stream?: boolean;
+  streamPageUrls?: string[];
+  streamSource?: string;
+  streamChapterId?: string;
+  streamSeriesId?: string;
+}
+interface ChapterRef {
+  id: string;
+  label: string;
+  streamSource?: string;
+  streamSeriesId?: string;
+  number?: number;
+}
 interface FlatItem { ci: number; number: number; width: number | null; height: number | null; key: string; firstOfChapter: boolean }
 
 const WINDOW_BEHIND = 2;
@@ -48,8 +66,64 @@ async function loadChapter(bookId: string): Promise<Chapter | null> {
   }
 }
 
+async function loadStreamChapter(
+  source: string,
+  chapterId: string,
+  seriesId?: string,
+  number?: string,
+  title?: string,
+  seriesTitle?: string
+): Promise<Chapter | null> {
+  try {
+    const q = new URLSearchParams({
+      source,
+      chapterId,
+      ...(seriesId ? { seriesId } : {}),
+      ...(number ? { number } : {}),
+      ...(title ? { title } : {}),
+      ...(seriesTitle ? { seriesTitle } : {}),
+    });
+    const res = await api<{
+      sessionId: string;
+      source: string;
+      chapterId: string;
+      seriesId: string;
+      chapterNumber: number;
+      title: string;
+      seriesTitle: string;
+      totalPages: number;
+      pages: { number: number; url: string }[];
+    }>(`/api/stream/chapter?${q.toString()}`);
+
+    return {
+      id: `${source}:${chapterId}`,
+      seriesId: seriesId || source,
+      seriesTitle: res.seriesTitle || seriesTitle || 'Manga',
+      title: res.title || (res.chapterNumber ? `Chapter ${res.chapterNumber}` : 'Chapter'),
+      pages: res.pages.map((p) => ({ number: p.number, width: null, height: null })),
+      offline: false,
+      stream: true,
+      streamPageUrls: res.pages.map((p) => p.url),
+      streamSource: source,
+      streamChapterId: chapterId,
+      streamSeriesId: seriesId,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function ReaderInner() {
-  const bookId = useSearchParams().get('book') || '';
+  const searchParams = useSearchParams();
+  const bookId = searchParams.get('book') || '';
+  const streamSource = searchParams.get('source') || '';
+  const streamChapterId = searchParams.get('chapterId') || '';
+  const streamSeriesId = searchParams.get('seriesId') || '';
+  const streamNumber = searchParams.get('number') || '';
+  const streamTitle = searchParams.get('title') || '';
+  const streamSeriesTitle = searchParams.get('seriesTitle') || '';
+  const isStream = Boolean(streamSource && streamChapterId);
+  const [downloadingStream, setDownloadingStream] = useState(false);
   const router = useRouter();
 
   const [chapters, setChapters] = useState<Chapter[]>([]);
@@ -115,34 +189,58 @@ function ReaderInner() {
     blobUrls.current.forEach((u) => URL.revokeObjectURL(u));
     blobUrls.current.clear();
     (async () => {
-      const first = await loadChapter(bookId);
+      const first = isStream
+        ? await loadStreamChapter(streamSource, streamChapterId, streamSeriesId, streamNumber, streamTitle, streamSeriesTitle)
+        : await loadChapter(bookId);
       if (!alive) return;
       setFailed(null);
       // Empty and absent are different sentences, and neither of them is silence.
       const outcome = chapterOutcome(first);
-      // `|| !first` is for the type narrower's benefit; chapterOutcome already answers 'unavailable' for null.
       if (outcome !== 'ok' || !first) { setFailed(outcome === 'ok' ? 'unavailable' : outcome); setReady(true); return; }
-      // resume page from live progress
-      try {
-        const b = await api<Book>(`/api/books/${bookId}`);
-        if (b.readProgress && !b.readProgress.completed) setStartPage(b.readProgress.page);
-        else setStartPage(1);
-      } catch { setStartPage(1); }
+
+      setStartPage(1);
+      if (!isStream && bookId) {
+        try {
+          const b = await api<Book>(`/api/books/${bookId}`);
+          if (b.readProgress && !b.readProgress.completed) setStartPage(b.readProgress.page);
+        } catch {}
+      }
+
       if (!alive) return;
       setChapters([first]);
-      if (first.offline && first.pages[0] && first.pages[0].width && first.pages[0].height) {
-        // offline reading-direction hint not available here; keep current pref
-      }
+
       // chapter list for prev/next/jump
-      try {
-        const list = await api<Page<Book>>(`/api/series/${first.seriesId}/books?size=1000&sort=metadata.numberSort,asc`);
-        if (alive) setChapterRefs(list.content.map((b) => ({ id: b.id, label: chapterLabel(b) })));
-      } catch {}
+      if (isStream && streamSource && streamSeriesId) {
+        try {
+          const list = await api<{ chapters: Array<{ sourceId: string; number: number; title: string }> }>(
+            `/api/stream/chapters?source=${encodeURIComponent(streamSource)}&seriesId=${encodeURIComponent(streamSeriesId)}`
+          );
+          if (alive && list.chapters) {
+            setChapterRefs(
+              list.chapters.map((c) => ({
+                id: c.sourceId,
+                label: c.title || `Chapter ${c.number}`,
+                streamSource,
+                streamSeriesId,
+                number: c.number,
+              }))
+            );
+          }
+        } catch {}
+      } else if (!isStream && first.seriesId) {
+        try {
+          const list = await api<Page<Book>>(`/api/series/${first.seriesId}/books?size=1000&sort=metadata.numberSort,asc`);
+          if (alive) setChapterRefs(list.content.map((b) => ({ id: b.id, label: chapterLabel(b) })));
+        } catch {}
+      }
+
       // reading direction (drives double-spread pair order for RTL manga)
-      try {
-        const s = await api<Series>(`/api/series/${first.seriesId}`);
-        if (alive) setRtl(s?.metadata?.readingDirection === 'RIGHT_TO_LEFT');
-      } catch {}
+      if (!isStream && first.seriesId) {
+        try {
+          const s = await api<Series>(`/api/series/${first.seriesId}`);
+          if (alive) setRtl(s?.metadata?.readingDirection === 'RIGHT_TO_LEFT');
+        } catch {}
+      }
       setReady(true);
     })();
     return () => {
@@ -151,7 +249,7 @@ function ReaderInner() {
       blobUrls.current.clear();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bookId, reloadKey]);
+  }, [bookId, streamSource, streamChapterId, reloadKey]);
 
   // ---- flat page list across loaded chapters ----
   const flat: FlatItem[] = useMemo(() => {
@@ -256,6 +354,7 @@ function ReaderInner() {
     const ch = chapters[it.ci];
     if (!ch) return null;
     if (ch.offline) return blobUrls.current.get(it.key) || null;
+    if (ch.stream && ch.streamPageUrls) return ch.streamPageUrls[it.number - 1] || null;
     return img.page(ch.id, it.number);
   };
 
@@ -298,7 +397,9 @@ function ReaderInner() {
       const idx = chapterRefs.findIndex((c) => c.id === last?.id);
       const next = idx >= 0 ? chapterRefs[idx + 1] : null;
       if (!next) { noMore.current = true; setEnded(true); appending.current = false; return; }
-      const ch = await loadChapter(next.id);
+      const ch = isStream
+        ? await loadStreamChapter(streamSource, next.id, streamSeriesId, String(next.number ?? ''), next.label, streamSeriesTitle)
+        : await loadChapter(next.id);
       const outcome = chapterOutcome(ch);
       if (outcome === 'ok') setChapters((cs) => (cs.some((c) => c.id === ch!.id) ? cs : [...cs, ch!]));
       // There IS a next chapter -- chapterRefs says so -- and it would not load. Claiming the series is
@@ -317,9 +418,15 @@ function ReaderInner() {
   const completedSent = useRef(new Set<string>());
   const prevPos = useRef<{ ci: number } | null>(null);
   const sendProgress = useCallback((chId: string, sId: string, page: number, completed: boolean) => {
+    if (isStream) {
+      try {
+        localStorage.setItem(`yomi_stream_prog_${sId}`, JSON.stringify({ chapterId: chId, page, completed, time: Date.now() }));
+      } catch {}
+      return;
+    }
     const payload = { page, completed, seriesId: sId, deviceId: deviceId() };
     api(`/api/books/${chId}/progress`, { method: 'PUT', json: payload }).catch(() => queueProgress({ bookId: chId, ...payload }));
-  }, []);
+  }, [isStream]);
   useEffect(() => {
     if (!ready || !flat.length) return;
     const it = flat[current];
@@ -394,8 +501,26 @@ function ReaderInner() {
   const activeSeriesId = activeChapter?.seriesId || seriesId;
   const seriesHref = activeSeriesId ? `/series/?id=${activeSeriesId}` : null;
 
-  const back = () => (typeof window !== 'undefined' && window.history.length > 1 ? router.back() : router.push(seriesId ? `/series/?id=${seriesId}` : '/'));
-  const goChapter = (cid?: string) => { if (cid) router.replace(`/reader/?book=${cid}`); };
+  const back = () => {
+    if (typeof window !== 'undefined' && window.history.length > 1) {
+      router.back();
+    } else {
+      router.push(isStream ? '/discover' : (seriesId ? `/series/?id=${seriesId}` : '/'));
+    }
+  };
+  const goChapter = (cid?: string) => {
+    if (!cid) return;
+    if (isStream) {
+      const ref = chapterRefs.find((r) => r.id === cid);
+      const num = ref?.number != null ? String(ref.number) : '';
+      const lbl = ref?.label || '';
+      router.replace(
+        `/reader/?source=${encodeURIComponent(streamSource)}&chapterId=${encodeURIComponent(cid)}&seriesId=${encodeURIComponent(streamSeriesId)}&number=${num}&title=${encodeURIComponent(lbl)}&seriesTitle=${encodeURIComponent(streamSeriesTitle)}`
+      );
+    } else {
+      router.replace(`/reader/?book=${cid}`);
+    }
+  };
   const toggleFullscreen = () => {
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     else document.documentElement.requestFullscreen?.().catch(() => {});
@@ -541,8 +666,13 @@ function ReaderInner() {
   // the header's two-line "what you are reading" block, wrapped in a link to the series when we know its id
   const titleBlock = (
     <>
-      <p className="flex items-center gap-1 text-sm font-medium text-white transition group-hover:text-accent">
+      <p className="flex items-center gap-1.5 text-sm font-medium text-white transition group-hover:text-accent">
         <span className="truncate">{activeChapter?.seriesTitle || 'Reading'}</span>
+        {isStream && (
+          <span className="chip text-[9px] px-1.5 py-0 text-accent-400 border-accent-500/40 bg-accent-500/10 shrink-0 font-medium">
+            Live Stream
+          </span>
+        )}
         {seriesHref && <IcChevronRight width={14} height={14} className="shrink-0 text-fog-500 transition group-hover:text-accent" />}
       </p>
       <p className="truncate text-[11px] text-fog-400">{activeChapter?.title}</p>
@@ -704,6 +834,31 @@ function ReaderInner() {
                   <path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1Z" />
                 </svg>
               </button>
+              {isStream && streamSource && streamSeriesId && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setDownloadingStream(true);
+                    try {
+                      const num = activeChapter?.title ? (parseFloat(activeChapter.title.replace(/[^0-9.]/g, '')) || 1) : 1;
+                      await api('/api/sources/add', {
+                        method: 'POST',
+                        json: { source: streamSource, sourceId: streamSeriesId, chapterNumbers: [num] },
+                      });
+                      alert(tr('Chapter queued for download into library!'));
+                    } catch {
+                      alert(tr('Failed to queue download.'));
+                    } finally {
+                      setDownloadingStream(false);
+                    }
+                  }}
+                  disabled={downloadingStream}
+                  className="hidden sm:flex items-center gap-1.5 rounded-full border border-ink-600 bg-black/45 px-3 py-1.5 text-xs text-fog-200 hover:text-white backdrop-blur transition disabled:opacity-50"
+                  title={tr('Save chapter to library')}
+                >
+                  <span>💾</span> {downloadingStream ? tr('Saving…') : tr('Save Chapter')}
+                </button>
+              )}
               <button onClick={() => setShowSettings(true)} className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-black/45 text-white backdrop-blur">
                 <IcSliders width={20} height={20} />
               </button>

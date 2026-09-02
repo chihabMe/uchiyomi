@@ -944,6 +944,7 @@ export default async function sourceRoutes(app: FastifyInstance) {
       genres: series?.genres || [], status: series?.status || '',
       count: chapters.length, first: nums.length ? Math.min(...nums) : null, last: nums.length ? Math.max(...nums) : null,
       chapters: chapters.map((c) => ({
+        sourceId: c.sourceId,
         number: c.number,
         name: c.title || `Chapter ${c.number}`,
         date: c.publishedAt || null,

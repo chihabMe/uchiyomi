@@ -13,7 +13,7 @@ import { IcCheck, IcChevronLeft, IcSearch } from '@/components/icons';
 import { t as tr } from '@/lib/i18n';
 
 export interface Provider { source: string; name: string; sourceId: string; title: string; coverUrl?: string }
-export interface ChapterItem { number: number; name?: string; date?: string | null }
+export interface ChapterItem { sourceId?: string; number: number; name?: string; date?: string | null }
 interface Detail {
   source: string; sourceId: string; title: string; summary: string; coverUrl: string | null;
   genres: string[]; status: string; count: number; first: number | null; last: number | null;
@@ -52,6 +52,8 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
   const [rangeEnd, setRangeEnd] = useState<string>('10');
   const [selectedChapters, setSelectedChapters] = useState<Set<number>>(new Set());
   const [chapterSearch, setChapterSearch] = useState('');
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
+  const [lastClickedIndex, setLastClickedIndex] = useState<number | null>(null);
   const [autoUpdate, setAutoUpdate] = useState(true);
   const [adding, setAdding] = useState(false);
   const [dup, setDup] = useState<string | null>(null);
@@ -86,57 +88,68 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
       .then((d) => {
         if (!ok) return;
         setDetail(d);
-        setCount(d.count);
-        setRangeStart(String(d.first ?? 1));
-        setRangeEnd(String(d.last ?? d.count ?? 10));
-        if (d.chapters?.length) {
-          setSelectedChapters(new Set(d.chapters.map((c) => c.number)));
+        if (d.first != null && d.last != null) {
+          setRangeStart(String(d.first));
+          setRangeEnd(String(Math.min(d.last, d.first + 9)));
         }
       })
-      .catch((e) => { if (ok) toast(msgOf(e, tr('Could not load details.')), 'error'); })
+      .catch((e) => { if (ok) toast(msgOf(e, tr('Could not load source details.')), 'error'); })
       .finally(() => { if (ok) setLoading(false); });
     return () => { ok = false; };
   }, [picked, toast]);
 
-  const jobs = useQuery({
+  const { data: jobs } = useQuery({
     queryKey: ['source-jobs'],
-    queryFn: () => api<{ content: Job[] }>('/api/sources/jobs'),
-    enabled: !!done && done.chapters > 0,
-    refetchInterval: 2000,
+    queryFn: () => api<{ content: Job[] }>('/api/sources/jobs').then((r) => r.content),
+    enabled: Boolean(done && done.chapters > 0),
+    refetchInterval: (q) => {
+      const active = q.state.data?.find((j) => done && j.folder === done.folder);
+      return active && active.status !== 'done' && active.status !== 'failed' ? 1000 : false;
+    },
   });
-  const job = jobs.data?.content?.find((j) => done && j.folder === done.folder);
+  const job = done ? jobs?.find((j) => j.folder === done.folder) : undefined;
 
-  const effectiveSelectedCount = useMemo(() => {
-    if (!detail) return 0;
-    if (mode === 'preset') return count || detail.count;
-    if (mode === 'range') {
-      const s = Number(rangeStart) || 0;
-      const e = Number(rangeEnd) || 0;
-      if (detail.chapters?.length) {
-        return detail.chapters.filter((c) => c.number >= s && c.number <= e).length;
-      }
-      return Math.max(0, e - s + 1);
-    }
-    if (mode === 'custom') return selectedChapters.size;
-    return detail.count;
-  }, [detail, mode, count, rangeStart, rangeEnd, selectedChapters]);
-
+  // Filtered & sorted chapter list
   const filteredChapters = useMemo(() => {
     if (!detail?.chapters) return [];
-    if (!chapterSearch.trim()) return detail.chapters;
-    const q = chapterSearch.toLowerCase().trim();
-    return detail.chapters.filter(
-      (c) => String(c.number).includes(q) || (c.name && c.name.toLowerCase().includes(q)),
-    );
-  }, [detail, chapterSearch]);
+    let list = detail.chapters;
+    if (chapterSearch.trim()) {
+      const q = chapterSearch.trim().toLowerCase();
+      list = list.filter((c) => String(c.number).includes(q) || (c.name && c.name.toLowerCase().includes(q)));
+    }
+    return [...list].sort((a, b) => (sortOrder === 'asc' ? a.number - b.number : b.number - a.number));
+  }, [detail?.chapters, chapterSearch, sortOrder]);
 
-  const toggleChapter = (num: number) => {
+  const effectiveSelectedCount = useMemo(() => {
+    if (mode === 'preset') return count === 0 ? (detail?.count ?? 0) : count;
+    if (mode === 'range') {
+      const s = Number(rangeStart);
+      const e = Number(rangeEnd);
+      if (isNaN(s) || isNaN(e) || s > e || !detail?.chapters) return 0;
+      return detail.chapters.filter((c) => c.number >= s && c.number <= e).length;
+    }
+    return selectedChapters.size;
+  }, [mode, count, rangeStart, rangeEnd, selectedChapters, detail]);
+
+  const toggleChapter = (num: number, idx?: number, shiftKey?: boolean) => {
     setSelectedChapters((prev) => {
       const next = new Set(prev);
-      if (next.has(num)) next.delete(num);
-      else next.add(num);
+      if (shiftKey && lastClickedIndex !== null && idx !== undefined) {
+        const start = Math.min(lastClickedIndex, idx);
+        const end = Math.max(lastClickedIndex, idx);
+        const range = filteredChapters.slice(start, end + 1);
+        const shouldSelect = !prev.has(num);
+        range.forEach((c) => {
+          if (shouldSelect) next.add(c.number);
+          else next.delete(c.number);
+        });
+      } else {
+        if (next.has(num)) next.delete(num);
+        else next.add(num);
+      }
       return next;
     });
+    if (idx !== undefined) setLastClickedIndex(idx);
   };
 
   const selectAllFiltered = () => {
@@ -153,6 +166,36 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
       filteredChapters.forEach((c) => next.delete(c.number));
       return next;
     });
+  };
+
+  const pickFirstN = (n: number) => {
+    if (!detail?.chapters) return;
+    const sorted = [...detail.chapters].sort((a, b) => a.number - b.number);
+    const slice = sorted.slice(0, n);
+    setSelectedChapters(new Set(slice.map((c) => c.number)));
+    setMode('custom');
+  };
+
+  const pickLastN = (n: number) => {
+    if (!detail?.chapters) return;
+    const sorted = [...detail.chapters].sort((a, b) => b.number - a.number);
+    const slice = sorted.slice(0, n);
+    setSelectedChapters(new Set(slice.map((c) => c.number)));
+    setMode('custom');
+  };
+
+  const openStreamReader = (c?: ChapterItem) => {
+    if (!picked || !detail) return;
+    const target = c || (detail.chapters && detail.chapters[0]);
+    if (!target) {
+      toast(tr('No chapters available to read.'), 'error');
+      return;
+    }
+    const chId = target.sourceId || String(target.number);
+    onClose();
+    router.push(
+      `/reader/?source=${encodeURIComponent(picked.source)}&chapterId=${encodeURIComponent(chId)}&seriesId=${encodeURIComponent(picked.sourceId)}&number=${target.number}&title=${encodeURIComponent(target.name || `Chapter ${target.number}`)}&seriesTitle=${encodeURIComponent(detail.title || picked.title)}`
+    );
   };
 
   const add = async (force = false) => {
@@ -260,12 +303,12 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
                 <button key={`${p.source}:${p.sourceId}`} onClick={() => setPicked(p)}
                   className="flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-start hover:bg-ink-800/60">
                   <Img src={sourceCover(p.source, p.coverUrl)} alt="" fallbackSrc={p.coverUrl}
-                    className="h-14 w-10 shrink-0 rounded" />
+                    className="h-14 w-10 shrink-0 rounded object-cover" />
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm text-fog-100">{p.name}</span>
+                    <span className="block truncate text-sm text-fog-100 font-medium">{p.name}</span>
                     <span className="block truncate text-[11px] text-fog-500">{p.title}</span>
                   </span>
-                  {i === 0 && <span className="chip shrink-0 text-[10px]">{tr('preferred')}</span>}
+                  {i === 0 && <span className="chip shrink-0 text-[10px] text-accent-400 border-accent-500/30">{tr('preferred')}</span>}
                 </button>
               ))}
             </div>
@@ -285,36 +328,63 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
         <p className="py-10 text-center text-sm text-fog-500">{tr('Loading…')}</p>
       ) : (
         <div className="sm:flex sm:gap-4">
-          <div className="mb-3 shrink-0 sm:mb-0 sm:w-40">
+          <div className="mb-3 shrink-0 sm:mb-0 sm:w-44">
             <Img src={sourceCover(detail.source, detail.coverUrl)} alt="" fallbackSrc={detail.coverUrl || undefined}
-              className="aspect-[2/3] w-28 rounded-xl border border-ink-700 sm:w-40 object-cover" />
-            <div className="mt-2 text-xs text-fog-500">
-              <p>{detail.count} {detail.count === 1 ? tr('chapter') : tr('chapters')}</p>
-              {detail.first != null && detail.last != null && <p>Ch. {detail.first}–{detail.last}</p>}
+              className="aspect-[2/3] w-28 rounded-xl border border-ink-700/80 shadow-lg sm:w-44 object-cover" />
+            <div className="mt-2.5 text-xs text-fog-500 space-y-0.5">
+              <p className="font-medium text-fog-300">{detail.count} {detail.count === 1 ? tr('chapter') : tr('chapters')}</p>
+              {detail.first != null && detail.last != null && <p className="text-[11px]">Ch. {detail.first}–{detail.last}</p>}
             </div>
+
+            {/* Read Online Button */}
+            <button
+              type="button"
+              onClick={() => openStreamReader()}
+              className="mt-3 flex items-center justify-center gap-1.5 w-full rounded-lg border border-accent-500/40 bg-accent-500/10 py-2 px-3 text-xs font-semibold text-accent-300 transition hover:bg-accent-500/20 active:scale-95"
+            >
+              <span>📖</span> {tr('Read Online Now')}
+            </button>
           </div>
+
           <div className="min-w-0 flex-1">
-            {providers && providers.length > 1 && (
-              <button onClick={() => { setPicked(null); setDetail(null); }} className="chip mb-2 text-xs">
-                <IcChevronLeft width={13} height={13} />{tr('Change source')}
-              </button>
-            )}
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              {providers && providers.length > 1 ? (
+                <button onClick={() => { setPicked(null); setDetail(null); }} className="chip text-xs hover:border-ink-600">
+                  <IcChevronLeft width={13} height={13} /> {picked.name} · {tr('Change source')}
+                </button>
+              ) : (
+                <span className="chip text-xs text-fog-400">{picked.name}</span>
+              )}
+              {detail.status && (
+                <span className="text-[10px] uppercase tracking-wider font-semibold text-fog-500">
+                  {detail.status}
+                </span>
+              )}
+            </div>
+
             {detail.genres.length > 0 && (
               <p className="line-clamp-1 text-[11px] text-fog-500">{detail.genres.slice(0, 4).join(' · ')}</p>
             )}
-            {summary && <p className="mt-1 line-clamp-3 text-xs leading-relaxed text-fog-400">{summary}</p>}
+            {summary && <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-fog-400">{summary}</p>}
 
-            {/* Selection Mode Selector */}
-            <div className="mt-3">
-              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-fog-500">
-                {tr('Download Selection')}
-              </label>
-              <div className="grid grid-cols-3 gap-1 rounded-lg bg-ink-900/80 p-1 border border-ink-700/60">
+            {/* Selection Mode Switcher */}
+            <div className="mt-3.5">
+              <div className="flex items-center justify-between mb-1.5">
+                <label className="text-xs font-semibold uppercase tracking-wider text-fog-400">
+                  {tr('Download Selection')}
+                </label>
+                {effectiveSelectedCount > 0 && (
+                  <span className="text-[11px] text-fog-500 font-mono">
+                    ~{effectiveSelectedCount * 14} MB estimated
+                  </span>
+                )}
+              </div>
+              <div className="grid grid-cols-3 gap-1 rounded-lg bg-ink-950/80 p-1 border border-ink-800">
                 <button
                   type="button"
                   onClick={() => setMode('preset')}
                   className={`rounded-md py-1.5 text-xs font-medium transition ${
-                    mode === 'preset' ? 'bg-ink-700 text-white shadow-sm' : 'text-fog-400 hover:text-fog-200'
+                    mode === 'preset' ? 'bg-ink-800 text-white shadow-sm' : 'text-fog-400 hover:text-fog-200'
                   }`}
                 >
                   {tr('Preset')}
@@ -323,7 +393,7 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
                   type="button"
                   onClick={() => setMode('range')}
                   className={`rounded-md py-1.5 text-xs font-medium transition ${
-                    mode === 'range' ? 'bg-ink-700 text-white shadow-sm' : 'text-fog-400 hover:text-fog-200'
+                    mode === 'range' ? 'bg-ink-800 text-white shadow-sm' : 'text-fog-400 hover:text-fog-200'
                   }`}
                 >
                   {tr('Range')}
@@ -332,7 +402,7 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
                   type="button"
                   onClick={() => setMode('custom')}
                   className={`rounded-md py-1.5 text-xs font-medium transition ${
-                    mode === 'custom' ? 'bg-ink-700 text-white shadow-sm' : 'text-fog-400 hover:text-fog-200'
+                    mode === 'custom' ? 'bg-ink-800 text-white shadow-sm' : 'text-fog-400 hover:text-fog-200'
                   }`}
                 >
                   {tr('Choose ({n})').replace('{n}', String(selectedChapters.size))}
@@ -340,39 +410,52 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
               </div>
             </div>
 
-            {/* Mode 1: Preset */}
+            {/* Mode 1: Presets */}
             {mode === 'preset' && (
-              <div className="mt-2.5">
-                <select value={count} onChange={(e) => setCount(Number(e.target.value))} className="field w-full">
-                  <option value={detail.count}>{tr('All ({n})', { n: detail.count })}</option>
-                  {presets.map((n) => <option key={n} value={n}>{tr('First {n}', { n })}</option>)}
-                </select>
+              <div className="mt-2.5 flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setCount(0)}
+                  className={`chip text-xs py-1.5 px-3 transition ${count === 0 ? 'bg-accent text-white border-accent' : ''}`}
+                >
+                  {tr('All ({n})', { n: detail.count })}
+                </button>
+                {presets.map((n) => (
+                  <button
+                    key={n}
+                    type="button"
+                    onClick={() => setCount(n)}
+                    className={`chip text-xs py-1.5 px-3 transition ${count === n ? 'bg-accent text-white border-accent' : ''}`}
+                  >
+                    {tr('First {n}', { n })}
+                  </button>
+                ))}
               </div>
             )}
 
             {/* Mode 2: Range */}
             {mode === 'range' && (
-              <div className="mt-2.5 rounded-xl border border-ink-700/70 bg-ink-900/40 p-3">
+              <div className="mt-2.5 rounded-xl border border-ink-800 bg-ink-950/60 p-3">
                 <div className="flex items-center gap-2">
                   <div className="flex-1">
-                    <label className="text-[11px] text-fog-400">{tr('From Chapter')}</label>
+                    <label className="text-[11px] text-fog-400 font-medium">{tr('From Chapter')}</label>
                     <input
                       type="number"
                       step="any"
                       value={rangeStart}
                       onChange={(e) => setRangeStart(e.target.value)}
-                      className="mt-1 w-full rounded-lg border border-ink-700 bg-ink-950 px-3 py-1.5 text-sm text-fog-100 focus:border-accent-500 focus:outline-none"
+                      className="mt-1 w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-1.5 text-sm text-fog-100 focus:border-accent-500 focus:outline-none"
                     />
                   </div>
-                  <span className="mt-5 text-sm text-fog-500">—</span>
+                  <span className="mt-5 text-sm text-fog-500 font-bold">—</span>
                   <div className="flex-1">
-                    <label className="text-[11px] text-fog-400">{tr('To Chapter')}</label>
+                    <label className="text-[11px] text-fog-400 font-medium">{tr('To Chapter')}</label>
                     <input
                       type="number"
                       step="any"
                       value={rangeEnd}
                       onChange={(e) => setRangeEnd(e.target.value)}
-                      className="mt-1 w-full rounded-lg border border-ink-700 bg-ink-950 px-3 py-1.5 text-sm text-fog-100 focus:border-accent-500 focus:outline-none"
+                      className="mt-1 w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-1.5 text-sm text-fog-100 focus:border-accent-500 focus:outline-none"
                     />
                   </div>
                 </div>
@@ -384,59 +467,93 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
 
             {/* Mode 3: Custom Checkbox List */}
             {mode === 'custom' && (
-              <div className="mt-2.5 rounded-xl border border-ink-700/70 bg-ink-900/40 p-2.5">
-                <div className="flex items-center gap-2">
+              <div className="mt-2.5 rounded-xl border border-ink-800 bg-ink-950/60 p-2.5">
+                {/* Search & Action Bar */}
+                <div className="flex items-center gap-1.5">
                   <div className="relative flex-1">
                     <input
                       type="text"
                       placeholder={tr('Filter chapters…')}
                       value={chapterSearch}
                       onChange={(e) => setChapterSearch(e.target.value)}
-                      className="w-full rounded-lg border border-ink-700 bg-ink-950 px-2.5 py-1 text-xs text-fog-100 placeholder:text-fog-600 focus:outline-none"
+                      className="w-full rounded-lg border border-ink-700 bg-ink-900 px-2.5 py-1 text-xs text-fog-100 placeholder:text-fog-600 focus:outline-none"
                     />
                   </div>
                   <button
                     type="button"
-                    onClick={selectAllFiltered}
-                    className="chip text-[10px] py-1 px-2"
+                    onClick={() => setSortOrder((s) => (s === 'desc' ? 'asc' : 'desc'))}
+                    className="chip text-[10px] py-1 px-2 font-mono shrink-0 hover:border-ink-600"
+                    title={tr('Toggle sort direction')}
                   >
-                    {tr('Select All')}
+                    {sortOrder === 'desc' ? '▼ Newest' : '▲ Oldest'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={selectAllFiltered}
+                    className="chip text-[10px] py-1 px-2 shrink-0 hover:border-ink-600"
+                  >
+                    {tr('All')}
                   </button>
                   <button
                     type="button"
                     onClick={deselectAllFiltered}
-                    className="chip text-[10px] py-1 px-2"
+                    className="chip text-[10px] py-1 px-2 shrink-0 hover:border-ink-600"
                   >
-                    {tr('Deselect')}
+                    {tr('Clear')}
                   </button>
                 </div>
 
-                <div className="mt-2 max-h-36 overflow-y-auto space-y-1 pr-1">
+                {/* Quick Presets Bar */}
+                <div className="mt-1.5 flex flex-wrap gap-1 items-center text-[10px] text-fog-500">
+                  <span className="mr-0.5">{tr('Quick:')}</span>
+                  <button type="button" onClick={() => pickFirstN(10)} className="hover:text-accent-400 underline">First 10</button>
+                  <span>·</span>
+                  <button type="button" onClick={() => pickFirstN(25)} className="hover:text-accent-400 underline">First 25</button>
+                  <span>·</span>
+                  <button type="button" onClick={() => pickLastN(10)} className="hover:text-accent-400 underline">Last 10</button>
+                </div>
+
+                {/* Chapter Scroll Area */}
+                <div className="mt-2 max-h-40 overflow-y-auto space-y-0.5 pr-1">
                   {filteredChapters.length === 0 ? (
-                    <p className="py-3 text-center text-xs text-fog-500">{tr('No chapters found')}</p>
+                    <p className="py-4 text-center text-xs text-fog-500">{tr('No chapters found')}</p>
                   ) : (
-                    filteredChapters.map((c) => {
+                    filteredChapters.map((c, idx) => {
                       const isChecked = selectedChapters.has(c.number);
                       return (
-                        <label
+                        <div
                           key={c.number}
-                          className={`flex items-center gap-2.5 rounded-lg px-2 py-1 text-xs cursor-pointer transition ${
-                            isChecked ? 'bg-ink-800/80 text-fog-100' : 'text-fog-400 hover:bg-ink-800/40'
+                          onClick={(e) => toggleChapter(c.number, idx, e.shiftKey)}
+                          className={`flex items-center gap-2 rounded-lg px-2 py-1 text-xs cursor-pointer select-none transition ${
+                            isChecked ? 'bg-ink-800/90 text-white' : 'text-fog-400 hover:bg-ink-900/80 hover:text-fog-200'
                           }`}
                         >
                           <input
                             type="checkbox"
                             checked={isChecked}
-                            onChange={() => toggleChapter(c.number)}
-                            className="rounded border-ink-600 bg-ink-950 text-accent-500 focus:ring-0"
+                            onChange={() => {}}
+                            className="rounded border-ink-600 bg-ink-950 text-accent-500 focus:ring-0 shrink-0 pointer-events-none"
                           />
-                          <span className="font-mono text-[11px] text-fog-300">Ch. {c.number}</span>
-                          <span className="truncate text-fog-400">{c.name || ''}</span>
-                        </label>
+                          <span className="font-mono text-[11px] text-fog-300 font-semibold shrink-0">Ch. {c.number}</span>
+                          <span className="truncate flex-1 text-fog-400 text-[11px]">{c.name || ''}</span>
+                          {/* Live Stream link */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openStreamReader(c);
+                            }}
+                            className="text-[10px] text-accent-400 hover:text-accent-300 px-1.5 py-0.5 rounded bg-ink-900 border border-accent-500/20 hover:border-accent-500/50 shrink-0"
+                            title={tr('Stream this chapter immediately')}
+                          >
+                            📖 {tr('Read')}
+                          </button>
+                        </div>
                       );
                     })
                   )}
                 </div>
+
                 <div className="mt-1.5 flex justify-between text-[11px] text-fog-500 px-1">
                   <span>{tr('{n} chapters picked').replace('{n}', String(selectedChapters.size))}</span>
                   <span>{tr('Total: {n}').replace('{n}', String(detail.count))}</span>
@@ -445,27 +562,32 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
             )}
 
             <div className="mt-3 flex items-center justify-between gap-3">
-              <span className="text-xs text-fog-200">{tr('Auto-update new chapters')}</span>
+              <span className="text-xs text-fog-300">{tr('Auto-update new chapters')}</span>
               <Switch on={autoUpdate} onChange={setAutoUpdate} label={tr('Auto-update new chapters')} />
             </div>
 
-            {effectiveSelectedCount > 40 && (
-              <p className="mt-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300">
-                {tr('Grabbing many chapters ({n}) can get you rate-limited. It pauses on its own and you can resume later.').replace('{n}', String(effectiveSelectedCount))}
-              </p>
+            {dup && (
+              <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-xs text-amber-200">
+                <p>{dup}</p>
+                <button
+                  type="button"
+                  onClick={() => add(true)}
+                  disabled={adding}
+                  className="mt-1 font-semibold text-amber-100 underline hover:no-underline"
+                >
+                  {tr('Add anyway')}
+                </button>
+              </div>
             )}
-            {dup && <p className="mt-2.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300">{dup}</p>}
 
             <button
-              onClick={() => add(!!dup)}
+              onClick={() => add()}
               disabled={adding || effectiveSelectedCount === 0}
-              className="btn-accent mt-3.5 w-full py-2.5 text-sm disabled:opacity-50"
+              className="btn-accent mt-3.5 w-full py-2.5 text-sm font-semibold disabled:opacity-50 transition active:scale-[0.99]"
             >
               {adding
-                ? tr('Working…')
-                : dup
-                ? tr('Add anyway ({n} chapters)').replace('{n}', String(effectiveSelectedCount))
-                : tr('Download {n} chapters').replace('{n}', String(effectiveSelectedCount))}
+                ? tr('Adding…')
+                : tr('Download {n} chapters', { n: effectiveSelectedCount })}
             </button>
           </div>
         </div>

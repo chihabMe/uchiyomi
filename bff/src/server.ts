@@ -26,6 +26,7 @@ import personalRoutes from './routes/personal';
 import downloadRoutes from './routes/downloads';
 import sourceRoutes from './routes/sources';
 import opdsRoutes from './routes/opds';
+import { streamRoutes } from './routes/stream';
 
 async function main() {
   await migrate();
@@ -123,6 +124,7 @@ async function main() {
   await app.register(downloadRoutes);
   await app.register(sourceRoutes);
   await app.register(opdsRoutes);
+  await app.register(streamRoutes);
 
   // The web app, when it is packaged into this image. Registered after every API route so a path collision
   // can only ever go the safe way. Unset WEB_ROOT and this is a no-op: nginx keeps serving it as before.
