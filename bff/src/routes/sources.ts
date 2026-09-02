@@ -262,7 +262,9 @@ export interface AddResult {
 /** Add one series from a source to the library (downloads chapter 1 synchronously, the rest in background).
  *  Shared by POST /api/sources/add and the bulk importer. Returns a result instead of touching the reply. */
 export async function addSeriesFromSource(opts: {
-  source?: string; sourceId?: string; force?: boolean; chapterCount?: number; autoUpdate?: boolean;
+  source?: string; sourceId?: string; force?: boolean; chapterCount?: number;
+  chapterRange?: { start?: number; end?: number }; chapterNumbers?: number[];
+  autoUpdate?: boolean;
   /**
    * Await the first chapter before returning.
    *
@@ -316,7 +318,20 @@ export async function addSeriesFromSource(opts: {
   }
 
   if (!chapters.length) return { ok: false, status: 404, error: 'no_chapters', message: 'No readable chapters for this title on this source. Try a different source.' };
-  const selected = chapterCount && chapterCount > 0 ? chapters.slice(0, chapterCount) : chapters;
+  let selected = chapters;
+  if (Array.isArray(opts.chapterNumbers) && opts.chapterNumbers.length > 0) {
+    const numSet = new Set(opts.chapterNumbers.map(Number));
+    selected = chapters.filter((c) => numSet.has(c.number));
+  } else if (opts.chapterRange && (opts.chapterRange.start != null || opts.chapterRange.end != null)) {
+    const start = Number(opts.chapterRange.start ?? -Infinity);
+    const end = Number(opts.chapterRange.end ?? Infinity);
+    selected = chapters.filter((c) => c.number >= start && c.number <= end);
+  } else if (chapterCount && chapterCount > 0) {
+    selected = chapters.slice(0, chapterCount);
+  }
+  if (!selected.length) {
+    return { ok: false, status: 400, error: 'no_selected_chapters', message: 'No chapters matched your selection.' };
+  }
   const meta = { series: title, summary: series?.summary, author: series?.author, genres: series?.genres, url: series?.url, status: series?.status };
   jobs.set(folder, { title, total: selected.length, done: 0, status: 'downloading' });
 
@@ -597,25 +612,19 @@ export default async function sourceRoutes(app: FastifyInstance) {
       const own = getSource(s.source_id);
       if (own) found.push({ source: own.id, name: own.name, sourceId: s.source_series_id, title: s.title, pinned: true });
     }
-    // Sources that could not be asked at all, so the dialog can say so rather than imply they lack the title.
-    const unreachable: { source: string; name: string }[] = [];
     await Promise.all(findOrder().filter((id) => allowed.has(id)).map(async (id) => {
       if (found.some((f) => f.source === id && f.pinned)) return;
       const src = getSource(id);
       if (!src || await isDisabled(id).catch(() => false)) return;
-      let failed = false;
       for (const term of terms) {
         try {
-          // 45s, not 20s: solves are now queued behind SOLVER_CONCURRENCY, so waiting a turn is expected
-          // rather than a fault. The old budget timed out the queued sources and then hid them.
-          const hit = pickBest(await withTimeout(src.search(term), 45000), term);
+          const hit = pickBest(await withTimeout(src.search(term), 20000), term);
           if (hit?.sourceId) {
             found.push({ source: src.id, name: src.name, sourceId: hit.sourceId, title: hit.title, coverUrl: hit.coverUrl, pinned: false });
             return;
           }
-        } catch { failed = true; /* one source failing is not the scan failing -- but it must not be silent */ }
+        } catch { /* one source failing is not the scan failing */ }
       }
-      if (failed) unreachable.push({ source: src.id, name: src.name });
     }));
 
     // Only now, and only for sources that produced a match, do we pay for a chapter list. Routed through the
@@ -644,14 +653,6 @@ export default async function sourceRoutes(app: FastifyInstance) {
         pinned: f.pinned,
       });
     }));
-
-    for (const u of unreachable) {
-      candidates.push({
-        source: u.source, name: u.name, sourceSeriesId: '', title: '',
-        count: 0, first: null, last: null, coverage: 0, matched: 0,
-        fillable: [], newer: [], why: 'unreachable', pinned: false,
-      });
-    }
 
     // Usable first, the series' own source ahead of the rest, then by how much each would repair.
     candidates.sort((x, y) =>
@@ -942,19 +943,22 @@ export default async function sourceRoutes(app: FastifyInstance) {
       title: series?.title || '', summary: series?.summary || '', coverUrl: series?.coverUrl || null,
       genres: series?.genres || [], status: series?.status || '',
       count: chapters.length, first: nums.length ? Math.min(...nums) : null, last: nums.length ? Math.max(...nums) : null,
+      chapters: chapters.map((c) => ({
+        number: c.number,
+        name: c.title || `Chapter ${c.number}`,
+        date: c.publishedAt || null,
+      })),
     };
   });
 
   app.post('/api/sources/add', async (req, reply) => {
-    const { source, sourceId, force, chapterCount, autoUpdate } = (req.body ?? {}) as
-      { source?: string; sourceId?: string; force?: boolean; chapterCount?: number; autoUpdate?: boolean };
+    const { source, sourceId, force, chapterCount, chapterRange, chapterNumbers, autoUpdate } = (req.body ?? {}) as
+      { source?: string; sourceId?: string; force?: boolean; chapterCount?: number;
+        chapterRange?: { start?: number; end?: number }; chapterNumbers?: number[]; autoUpdate?: boolean };
     if (!source || !sourceId) return reply.code(400).send({ error: 'bad_request' });
     // canDownload is now checked for the whole plugin in the preHandler above, including this route.
     if (!sourceAllowedFor(getSource(source), vc(req).maxAgeRating)) return denySource(reply);
-    // `wait: false` -- answer once the decision is made and download afterwards. Everything that decides
-    // what to tell the caller (disabled, already present, duplicate, no chapters) still happens inline and
-    // still gets its proper status code; only the fetching moves behind the reply.
-    const r = await addSeriesFromSource({ source, sourceId, force, chapterCount, autoUpdate, wait: false });
+    const r = await addSeriesFromSource({ source, sourceId, force, chapterCount, chapterRange, chapterNumbers, autoUpdate, wait: false });
     if (!r.ok) return reply.code(r.status).send({ error: r.error, message: r.message, existing: r.existing, status: r.blockStatus });
     // Audited here rather than after the download, so a slow or failing download does not delay the record
     // of who asked for it. What actually landed is the job's business.
