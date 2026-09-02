@@ -28,6 +28,26 @@ interface SearchGroup { title: string; coverUrl?: string; inLibrary?: boolean; u
  */
 const HERO_SLIDES = 10;
 
+const POPULAR_GENRES = [
+  { id: 'all', label: 'All' },
+  { id: 'Action', label: '⚔️ Action' },
+  { id: 'Isekai', label: '🏰 Isekai', tag: 'Isekai' },
+  { id: 'Martial Arts', label: '🥋 Murim', tag: 'Martial Arts' },
+  { id: 'Thriller', label: '🔪 Thriller' },
+  { id: 'Adventure', label: '🗺️ Adventure' },
+  { id: 'Fantasy', label: '🧙 Fantasy' },
+  { id: 'Romance', label: '❤️ Romance' },
+  { id: 'Psychological', label: '🧠 Psychological' },
+  { id: 'Horror', label: '💀 Horror' },
+  { id: 'Supernatural', label: '🔮 Supernatural' },
+  { id: 'Comedy', label: '🎭 Comedy' },
+  { id: 'Sci-Fi', label: '🚀 Sci-Fi' },
+  { id: 'Reincarnation', label: '⏳ Reincarnation', tag: 'Reincarnation' },
+  { id: 'Survival', label: '⚡ Survival', tag: 'Survival' },
+  { id: 'Villainess', label: '👑 Villainess', tag: 'Villainess' },
+];
+
+
 /** Titles compare the way the server compares them, so a card can flip to "in library" with no refetch. */
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
@@ -67,26 +87,11 @@ export default function DiscoverPage() {
   });
   const sources = useMemo(() => sourcesData?.content ?? [], [sourcesData]);
 
-  const { data: trending } = useQuery({
-    // NOT ['trending'] -- that key belongs to /api/trending, which is what the household is reading and is a
-    // Series[]. This is /api/discover/trending, which is AniList and carries genres, banner and score. They
-    // shared a key, so arriving here from the home page handed this the wrong shape out of the cache and the
-    // hero threw on `genres.slice`. A direct page load was fine, which is why it looked intermittent.
-    queryKey: ['discover-trending'],
-    queryFn: () => api<{ content: Trending[] }>('/api/discover/trending'),
-    enabled: mayAdd,
-    staleTime: 0,
-    refetchOnMount: 'always',
-  });
-
   // ---------------------------------------------------------------- the wall
-  const [mode, setMode] = useState<'newest' | 'search'>('newest');
-  /**
-   * Which listing the wall shows, and which single source (if any) is shown alone.
-   *
-   * `listMode` is NOT the same axis as `mode` above: that one is browse-versus-search, this one is the
-   * sort within browsing.
-   */
+  const [mode, setMode] = useState<'newest' | 'search' | 'explore'>('newest');
+  const [selectedGenre, setSelectedGenre] = useState<string>('all');
+  const [selectedFormat, setSelectedFormat] = useState<'all' | 'manhwa' | 'manga' | 'manhua'>('all');
+  const [selectedSort, setSelectedSort] = useState<'trending' | 'rating' | 'latest'>('trending');
   const [listMode, setListMode] = useState<ListMode>('newest');
   const [selected, setSelected] = useState<string | null>(null);
   const [q, setQ] = useState('');
@@ -98,6 +103,35 @@ export default function DiscoverPage() {
   const [searching, setSearching] = useState(false);
   const [seed, setSeed] = useState<AddSeed | null>(null);
   const [added, setAdded] = useState<Set<string>>(new Set());
+
+  const { data: exploreData, isLoading: exploreLoading } = useQuery({
+    queryKey: ['discover-explore', selectedGenre, selectedFormat, selectedSort, page],
+    queryFn: async () => {
+      const gItem = POPULAR_GENRES.find((x) => x.id === selectedGenre);
+      const genreParam = gItem && !gItem.tag && gItem.id !== 'all' ? gItem.id : '';
+      const tagParam = gItem?.tag || '';
+      const qParams = new URLSearchParams({
+        ...(genreParam ? { genre: genreParam } : {}),
+        ...(tagParam ? { tag: tagParam } : {}),
+        ...(selectedFormat !== 'all' ? { format: selectedFormat } : {}),
+        ...(selectedSort ? { sort: selectedSort } : {}),
+        page: String(page),
+      });
+      return api<{ content: Array<{ id: string; title: string; coverUrl?: string; summary?: string; genres: string[]; format?: string; inLibrary?: boolean }> }>(
+        `/api/discover/explore?${qParams.toString()}`
+      );
+    },
+    enabled: mode === 'explore',
+    staleTime: 5 * 60_000,
+  });
+
+  const { data: trending } = useQuery({
+    queryKey: ['discover-trending'],
+    queryFn: () => api<{ content: Trending[] }>('/api/discover/trending'),
+    enabled: mayAdd,
+    staleTime: 0,
+    refetchOnMount: 'always',
+  });
 
   // Ranked once; how many of them are actually asked grows as answers come back.
   // A source that cannot answer the chosen listing is not ranked at all, the same way one without `latest`
@@ -153,6 +187,16 @@ export default function DiscoverPage() {
 
   const wall = useMemo(() => {
     if (mode === 'search') return searchHits;
+    if (mode === 'explore') {
+      return (exploreData?.content ?? []).map((m) => ({
+        source: 'mangadex',
+        sourceId: m.id,
+        title: m.title,
+        coverUrl: m.coverUrl,
+        inLibrary: m.inLibrary,
+        updatedAt: m.format?.toUpperCase(),
+      }));
+    }
     const seen = new Set<string>();
     const out: SourceItem[] = [];
     // Strict arrival order. Interleaving by rank would push already-read tiles down as a slow source lands.
@@ -169,10 +213,10 @@ export default function DiscoverPage() {
       }
     }
     return out;
-  }, [mode, listMode, selected, searchHits, order, byId]);
+  }, [mode, listMode, selected, searchHits, order, byId, exploreData]);
 
   const nameOf = useCallback((id: string) => sources.find((s) => s.id === id)?.name, [sources]);
-  const pending = mode === 'newest' ? Math.max(0, budget.length - settled) : (searching ? 3 : 0);
+  const pending = mode === 'newest' ? Math.max(0, budget.length - settled) : mode === 'search' ? (searching ? 3 : 0) : (exploreLoading ? 6 : 0);
 
   const search = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -191,7 +235,14 @@ export default function DiscoverPage() {
     setSearching(false);
   };
   const groupsRef = useRef<Record<string, SearchGroup['providers']>>({});
-  const backToNewest = () => { setQ(''); setMode('newest'); setSearchHits([]); };
+  const backToNewest = () => {
+    setQ('');
+    setSelectedGenre('all');
+    setSelectedFormat('all');
+    setSelectedSort('trending');
+    setMode('newest');
+    setSearchHits([]);
+  };
 
   const open = (it: SourceItem) => {
     const providers = groupsRef.current[norm(it.title)];
@@ -302,6 +353,94 @@ export default function DiscoverPage() {
         </div>
       </header>
 
+      {/* GENRE & EXPLORE FILTER BAR */}
+      <div className="mt-5 space-y-3">
+        {/* Horizontal scrollable genre pill strip */}
+        <div className="hide-scrollbar flex items-center gap-1.5 overflow-x-auto pb-1">
+          {POPULAR_GENRES.map((g) => {
+            const isSelected = selectedGenre === g.id;
+            return (
+              <button
+                key={g.id}
+                onClick={() => {
+                  setSelectedGenre(g.id);
+                  setPage(1);
+                  if (g.id !== 'all') setMode('explore');
+                  else if (selectedFormat === 'all' && selectedSort === 'trending') setMode('newest');
+                }}
+                className={`chip shrink-0 text-xs px-3 py-1.5 transition ${
+                  isSelected
+                    ? 'border-accent bg-accent text-white font-medium shadow-sm'
+                    : 'text-fog-300 hover:text-white hover:border-ink-600'
+                }`}
+              >
+                {g.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Sub-bar: Format toggle & Sort selector */}
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-ink-800/80">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-fog-500 mr-1">{tr('Format')}:</span>
+            {[
+              { id: 'all', label: tr('All') },
+              { id: 'manhwa', label: '🇰🇷 Manhwa' },
+              { id: 'manga', label: '🇯🇵 Manga' },
+              { id: 'manhua', label: '🇨🇳 Manhua' },
+            ].map((f) => (
+              <button
+                key={f.id}
+                onClick={() => {
+                  setSelectedFormat(f.id as any);
+                  setPage(1);
+                  if (f.id !== 'all') setMode('explore');
+                  else if (selectedGenre === 'all' && selectedSort === 'trending') setMode('newest');
+                }}
+                className={`rounded-lg px-2.5 py-1 text-xs transition ${
+                  selectedFormat === f.id
+                    ? 'bg-ink-800 text-white font-medium border border-ink-700'
+                    : 'text-fog-400 hover:text-fog-200'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-fog-500">{tr('Sort')}:</span>
+            <select
+              value={selectedSort}
+              onChange={(e) => {
+                const s = e.target.value as any;
+                setSelectedSort(s);
+                setPage(1);
+                if (s !== 'trending' || selectedGenre !== 'all' || selectedFormat !== 'all') setMode('explore');
+              }}
+              className="rounded-lg border border-ink-700 bg-ink-900 px-2.5 py-1 text-xs text-fog-200 outline-none focus:border-accent"
+            >
+              <option value="trending">🔥 {tr('Trending')}</option>
+              <option value="rating">⭐ {tr('Top Rated')}</option>
+              <option value="latest">🆕 {tr('New Chapters')}</option>
+            </select>
+
+            {(selectedGenre !== 'all' || selectedFormat !== 'all' || selectedSort !== 'trending') && (
+              <button
+                onClick={backToNewest}
+                className="chip text-[11px] py-1 px-2 text-fog-400 hover:text-white"
+                title={tr('Reset all filters')}
+              >
+                <IcX width={12} height={12} className="inline mr-1" />
+                {tr('Reset')}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+
       {mode === 'newest' && (
         <SourcePicker
           sources={budget} states={states} settled={settled} total={budget.length}
@@ -346,11 +485,17 @@ export default function DiscoverPage() {
 
       <div className="mb-3 mt-6 flex items-baseline justify-between gap-3">
         <h2 className="font-display text-lg font-semibold tracking-tight text-fog-50 lg:text-xl">
-          {mode === 'search' ? tr('Results across your sources') : tr('Newest from your sources')}
+          {mode === 'search'
+            ? tr('Results across your sources')
+            : mode === 'explore'
+            ? `${selectedGenre === 'all' ? '' : selectedGenre + ' • '}${
+                selectedFormat === 'all' ? tr('Explore') : selectedFormat.toUpperCase()
+              }`
+            : tr('Newest from your sources')}
         </h2>
-        {mode === 'search' ? (
+        {mode !== 'newest' ? (
           <button onClick={backToNewest} className="chip shrink-0 text-xs">
-            <IcChevronLeft width={13} height={13} />{tr('Newest')}
+            <IcChevronLeft width={13} height={13} />{tr('Back to Newest')}
           </button>
         ) : budget.length > 0 && settled < budget.length ? (
           <span className="shrink-0 text-xs tabular-nums text-fog-500">

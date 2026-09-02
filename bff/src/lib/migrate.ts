@@ -207,6 +207,19 @@ ALTER TABLE lib_series ADD COLUMN IF NOT EXISTS deleted_at  timestamptz;
 ALTER TABLE lib_series ADD COLUMN IF NOT EXISTS merged_into text;
 CREATE INDEX IF NOT EXISTS lib_series_live_idx ON lib_series (id) WHERE deleted_at IS NULL AND merged_into IS NULL;
 
+-- multi-source fallbacks and migration history
+CREATE TABLE IF NOT EXISTS lib_series_sources (
+  id               text PRIMARY KEY,
+  series_id        text NOT NULL REFERENCES lib_series(id) ON DELETE CASCADE,
+  source_id        text NOT NULL,
+  source_series_id text NOT NULL,
+  source_name      text,
+  priority         int NOT NULL DEFAULT 1,
+  created_at       timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (series_id, source_id)
+);
+CREATE INDEX IF NOT EXISTS lib_series_sources_idx ON lib_series_sources (series_id, priority);
+
 
 -- A book is unique per (root, file), not per file: the same relative path legitimately exists under both the
 -- read library and the download dir. Strictly weaker than the old constraint, so it cannot fail to apply.

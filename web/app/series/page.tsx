@@ -16,6 +16,7 @@ import { useAuth, canDownload } from '@/lib/auth';
 import { IcChevronLeft, IcHeart, IcStar, IcPlay, IcDownload, IcCheck, IcTrash, IcSliders } from '@/components/icons';
 import { t as tr } from '@/lib/i18n';
 import { FindMissingDialog } from '@/components/FindMissingDialog';
+import { MigrateSourceDialog } from '@/components/MigrateSourceDialog';
 
 // The four the scanner itself writes from ComicInfo's PublishingStatus. Kept as a suggestion list rather
 // than a hard enum, because a file can carry anything and rejecting it would reject Uchiyomi's own data.
@@ -502,6 +503,7 @@ function SeriesInner() {
   const [editing, setEditing] = useState(false);
   const [collecting, setCollecting] = useState(false);
   const [findingMissing, setFindingMissing] = useState(false);
+  const [migrating, setMigrating] = useState(false);
   const [asc, setAsc] = useState(true);
   const [downloaded, setDownloaded] = useState<Set<string>>(new Set());
   const [showSummary, setShowSummary] = useState(false);
@@ -685,6 +687,10 @@ function SeriesInner() {
         <button onClick={() => setFindingMissing(true)} className="mt-1 flex items-center justify-center gap-2 rounded-full border border-ink-700 py-2.5 text-sm text-fog-300">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /><path d="M11 8v6M8 11h6" /></svg>{tr('Find missing chapters')}</button>
       )}
+      {canDownload(user) && (
+        <button onClick={() => setMigrating(true)} className="mt-1 flex items-center justify-center gap-2 rounded-full border border-ink-700 py-2.5 text-sm text-fog-300 hover:border-accent/40 hover:text-white transition">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" /></svg>{tr('Migrate source')}</button>
+      )}
       {isAdmin && (
         <>
           <button onClick={() => setEditing(true)} className="mt-1 flex items-center justify-center gap-2 rounded-full border border-ink-700 py-2.5 text-sm text-fog-300">
@@ -842,6 +848,7 @@ function SeriesInner() {
       )}
       {collecting && <CollectionSheet seriesId={id} onClose={() => setCollecting(false)} />}
       {findingMissing && <FindMissingDialog seriesId={id} onClose={() => setFindingMissing(false)} />}
+      {migrating && <MigrateSourceDialog seriesId={id} onClose={() => setMigrating(false)} />}
 
       {(similar?.content?.length ?? 0) > 0 && (
         <section className="mt-10">

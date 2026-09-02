@@ -23,6 +23,7 @@ import {
  */
 const FILL_MAX_CHAPTERS = 300;
 import { logAudit } from '../lib/audit';
+import { exploreManga, GENRE_MAP, TAG_MAP } from '../lib/explore';
 import { env } from '../env';
 // The "already in library" annotation is deliberately library-wide: it answers "would adding this be a
 // duplicate on this server", which is a property of the server, not of the person asking.
@@ -94,7 +95,7 @@ function pickBest<T extends { title: string }>(list: T[], term: string): T | nul
  * `addSeriesFromSource`, which has always compared this way.
  */
 const NORM_SQL = "lower(regexp_replace(s.title, '[^a-zA-Z0-9]', '', 'g'))";
-async function inLibrary(titles: Array<string | undefined>): Promise<Set<string>> {
+export async function inLibrary(titles: Array<string | undefined>): Promise<Set<string>> {
   const keys = [...new Set(titles.map((t) => norm(t || '')).filter(Boolean))];
   if (!keys.length) return new Set();
   const rows = await q<{ k: string }>(
@@ -966,4 +967,124 @@ export default async function sourceRoutes(app: FastifyInstance) {
     logAudit('download.add', { userId: (req as any).user?.sub, detail: { title: r.title, source, chapters: r.chapters }, req });
     return { ok: true, title: r.title, folder: r.folder, chapters: r.chapters, started: !!r.started };
   });
+
+  // Multi-genre, tag & format discovery
+  app.get('/api/discover/explore', async (req) => {
+    const { genre, tag, format, sort, q: queryTerm, page } = (req.query ?? {}) as any;
+    const items = await exploreManga({
+      genre: genre || undefined,
+      tag: tag || undefined,
+      format: format || undefined,
+      sort: sort || undefined,
+      q: queryTerm || undefined,
+      page: page ? Number(page) : 1,
+    });
+    return {
+      content: items,
+      genres: Object.keys(GENRE_MAP),
+      tags: Object.keys(TAG_MAP),
+    };
+  });
+
+  // Source migration candidates
+  app.get('/api/series/:id/migrate-candidates', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const s = await one<{ id: string; title: string; source: string; source_id: string; source_series_id: string }>(
+      'SELECT id, title, source, source_id, source_series_id FROM lib_series WHERE id = $1',
+      [id],
+    );
+    if (!s) return reply.code(404).send({ error: 'series_not_found' });
+
+    const currentCountRow = await one<{ c: number }>(
+      'SELECT count(*)::int as c FROM lib_books WHERE series_id = $1',
+      [id],
+    );
+    const localChapters = currentCountRow?.c || 0;
+
+    const allowed = new Set(reachable(req).map((x) => x.id));
+    const candidates: Array<{
+      source: string;
+      name: string;
+      sourceId: string;
+      title: string;
+      coverUrl?: string;
+      chapterCount: number;
+      isCurrent: boolean;
+    }> = [];
+
+    const term = s.title;
+    const order = findOrder().filter((sid) => allowed.has(sid));
+    await Promise.all(
+      order.map(async (sid) => {
+        const src = getSource(sid);
+        if (!src) return;
+        if (await isDisabled(sid).catch(() => false)) return;
+        try {
+          const results = await withTimeout(src.search(term), 12000);
+          const match = pickBest(results, term);
+          if (match) {
+            const chList = await withTimeout(src.listChapters(match.sourceId), 12000).catch(() => []);
+            candidates.push({
+              source: sid,
+              name: src.name,
+              sourceId: match.sourceId,
+              title: match.title,
+              coverUrl: match.coverUrl,
+              chapterCount: chList.length,
+              isCurrent: sid === s.source_id,
+            });
+          }
+        } catch {}
+      }),
+    );
+
+    candidates.sort((a, b) => b.chapterCount - a.chapterCount);
+    return {
+      content: candidates,
+      seriesTitle: s.title,
+      currentSourceId: s.source_id,
+      currentSourceName: s.source,
+      localChapters,
+    };
+  });
+
+  // Execute source migration
+  app.post('/api/series/:id/migrate', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { newSourceId, newSourceSeriesId, keepOldAsFallback } = (req.body ?? {}) as any;
+    if (!newSourceId || !newSourceSeriesId) {
+      return reply.code(400).send({ error: 'bad_request', message: 'newSourceId and newSourceSeriesId are required' });
+    }
+    const s = await one<{ id: string; source: string; source_id: string; source_series_id: string }>(
+      'SELECT id, source, source_id, source_series_id FROM lib_series WHERE id = $1',
+      [id],
+    );
+    if (!s) return reply.code(404).send({ error: 'series_not_found' });
+
+    const newSrc = getSource(newSourceId);
+    const newName = newSrc?.name || newSourceId;
+
+    if (keepOldAsFallback && s.source_id) {
+      await q(
+        `INSERT INTO lib_series_sources (id, series_id, source_id, source_series_id, source_name, priority)
+         VALUES ($1, $2, $3, $4, $5, 2)
+         ON CONFLICT (series_id, source_id) DO UPDATE SET priority = 2`,
+        [`${id}:${s.source_id}`, id, s.source_id, s.source_series_id, s.source],
+      ).catch(() => {});
+    }
+
+    await q(
+      `UPDATE lib_series SET source_id = $1, source_series_id = $2, source = $3 WHERE id = $4`,
+      [newSourceId, newSourceSeriesId, newName, id],
+    );
+
+    logAudit('series.migrate_source', {
+      userId: (req as any).user?.sub,
+      detail: { seriesId: id, oldSource: s.source_id, newSource: newSourceId },
+      req,
+    });
+
+    return { ok: true, sourceId: newSourceId, sourceName: newName };
+  });
 }
+

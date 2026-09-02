@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { getSource } from '../lib/sources';
 import { cfSession } from '../lib/sources/flaresolverr';
 import { authenticate, userIdOf, roleOf } from '../lib/auth';
+import { q } from '../lib/db';
 import { viewCtxFor, sourceAllowedFor, hideAdult, type ViewCtx } from '../lib/visibility';
 
 interface StreamSession {
@@ -72,10 +73,40 @@ export async function streamRoutes(app: FastifyInstance) {
     }
 
     let urls: string[] = [];
+    let effectiveSource = source;
+    let effectiveChapterId = chapterId;
+
     try {
       urls = await src.getPageUrls(chapterId);
-    } catch (e: any) {
-      return reply.code(502).send({ error: 'upstream_failed', message: e?.message || 'Failed to fetch pages from source' });
+    } catch {
+      urls = [];
+    }
+
+    // Multi-source fallback: if primary has 0 pages or failed, query fallbacks in lib_series_sources
+    if ((!urls || !urls.length) && seriesId && number) {
+      const targetNum = Number(number);
+      const fallbacks = await q<{ source_id: string; source_series_id: string }>(
+        'SELECT source_id, source_series_id FROM lib_series_sources WHERE series_id = $1 ORDER BY priority ASC',
+        [seriesId],
+      ).catch(() => []);
+
+      for (const fb of fallbacks) {
+        const fbSrc = getSource(fb.source_id);
+        if (!fbSrc) continue;
+        try {
+          const chList = await fbSrc.listChapters(fb.source_series_id);
+          const fbCh = chList.find((c) => Math.abs(c.number - targetNum) < 0.01);
+          if (fbCh) {
+            const fbUrls = await fbSrc.getPageUrls(fbCh.sourceId);
+            if (fbUrls && fbUrls.length) {
+              urls = fbUrls;
+              effectiveSource = fb.source_id;
+              effectiveChapterId = fbCh.sourceId;
+              break;
+            }
+          }
+        } catch {}
+      }
     }
 
     if (!urls || !urls.length) {
@@ -86,8 +117,8 @@ export async function streamRoutes(app: FastifyInstance) {
     const num = number ? Number(number) : undefined;
     const session: StreamSession = {
       id: sessionId,
-      source,
-      chapterId,
+      source: effectiveSource,
+      chapterId: effectiveChapterId,
       chapterNumber: num,
       chapterTitle: title,
       seriesTitle: seriesTitle,
