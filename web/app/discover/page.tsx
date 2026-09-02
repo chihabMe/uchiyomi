@@ -194,7 +194,6 @@ export default function DiscoverPage() {
   const backToNewest = () => { setQ(''); setMode('newest'); setSearchHits([]); };
 
   const open = (it: SourceItem) => {
-    if (it.inLibrary || added.has(norm(it.title))) return;
     const providers = groupsRef.current[norm(it.title)];
     if (providers?.length) setSeed({ kind: 'group', title: it.title, providers });
     else setSeed({ kind: 'result', provider: { source: it.source, name: nameOf(it.source) ?? it.source, sourceId: it.sourceId, title: it.title, coverUrl: it.coverUrl } });

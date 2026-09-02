@@ -66,8 +66,8 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
     if (providers || seed.kind === 'result') return;
     let ok = true;
     setLoading(true);
-    api<{ content: Provider[] }>('/api/sources/find', {
-      json: { title: seed.title, sources: sources.length ? sources : undefined },
+    const qParams = new URLSearchParams({ q: seed.title, ...(sources.length ? { sources: sources.join(',') } : {}) });
+    api<{ content: Provider[] }>(`/api/sources/find?${qParams.toString()}`, {
       signal: AbortSignal.timeout(25_000),
     })
       .then((r) => {
@@ -555,8 +555,8 @@ export function AddSeriesDialog({ seed, sources, onClose, onAdded }: {
                 </div>
 
                 <div className="mt-1.5 flex justify-between text-[11px] text-fog-500 px-1">
-                  <span>{tr('{n} chapters picked').replace('{n}', String(selectedChapters.size))}</span>
-                  <span>{tr('Total: {n}').replace('{n}', String(detail.count))}</span>
+                  <span>{tr('{n} chapters picked', { n: selectedChapters.size })}</span>
+                  <span>{tr('Total: {n}', { n: detail.count })}</span>
                 </div>
               </div>
             )}
