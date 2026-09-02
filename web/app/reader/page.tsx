@@ -11,8 +11,20 @@ import { chapterLabel } from '@/lib/format';
 import { deviceId } from '@/lib/device';
 import { getOfflineChapter, getPageBlob, queueProgress } from '@/lib/downloads';
 import { applyCover, clearCover } from '@/lib/theme';
-import { ReaderPrefs, loadPrefs, savePrefs, loadSeriesPrefs, saveSeriesPrefs, syncPrefsFromServer, THEME_FILTER } from '@/lib/readerPrefs';
+import {
+  ReaderPrefs,
+  ReaderMode,
+  FitMode,
+  TapZone,
+  loadPrefs,
+  savePrefs,
+  loadSeriesPrefs,
+  saveSeriesPrefs,
+  syncPrefsFromServer,
+  getEffectiveFilter,
+} from '@/lib/readerPrefs';
 import { ReaderSettings } from '@/components/ReaderSettings';
+import { ChapterDrawer } from '@/components/ChapterDrawer';
 import { Rail, SectionTitle } from '@/components/ui';
 import { SeriesCard } from '@/components/cards';
 import { IcChevronLeft, IcChevronRight, IcSliders } from '@/components/icons';
@@ -41,8 +53,8 @@ interface ChapterRef {
 }
 interface FlatItem { ci: number; number: number; width: number | null; height: number | null; key: string; firstOfChapter: boolean }
 
-const WINDOW_BEHIND = 2;
-const WINDOW_AHEAD = 6;
+const WINDOW_BEHIND = 4;
+const WINDOW_AHEAD = 10;
 const DIVIDER_H = 60;
 
 async function loadChapter(bookId: string): Promise<Chapter | null> {
@@ -130,24 +142,23 @@ function ReaderInner() {
   const [chapterRefs, setChapterRefs] = useState<ChapterRef[]>([]);
   const [startPage, setStartPage] = useState(1);
   const [ready, setReady] = useState(false);
-  const [ended, setEnded] = useState(false); // reached the last chapter of the series → show Up Next
-  /**
-   * The chapter could not be read. There was no such state at all, and three different upstream causes all
-   * arrived as one: a corrupt CBZ or an unmounted library answers `200 []` from the pages endpoint, while a
-   * book this account may not see throws 404. On first load both set `ready` with nothing behind it, which
-   * cleared the loading overlay and left a full-screen black rectangle. Mid-series both took the SAME branch
-   * as a genuine end of series, so a transient error told the reader "You finished".
-   */
+  const [ended, setEnded] = useState(false);
   const [failed, setFailed] = useState<null | 'unreadable' | 'unavailable'>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   const [prefs, setPrefs] = useState<ReaderPrefs>(loadPrefs());
   const [zoom, setZoom] = useState(1);
-  const [rtl, setRtl] = useState(false); // series reads right-to-left → double-spread pair order flips
-  const [scrubbing, setScrubbing] = useState(false); // slider drag in progress → show the page preview
+  const [rtl, setRtl] = useState(false);
+  const [scrubbing, setScrubbing] = useState(false);
 
   const [chrome, setChrome] = useState(true);
   const [showSettings, setShowSettings] = useState(false);
+  const [showChapters, setShowChapters] = useState(false);
+  const [showPageJump, setShowPageJump] = useState(false);
+  const [jumpPageVal, setJumpPageVal] = useState('');
+  const [clockTime, setClockTime] = useState('');
+  const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [current, setCurrent] = useState(0);
 
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -167,16 +178,56 @@ function ReaderInner() {
     setPrefs((cur) => {
       const n = { ...cur, ...p };
       savePrefs(n);
-      if ((p.mode || p.theme || p.spread !== undefined) && seriesId0) saveSeriesPrefs(seriesId0, { mode: n.mode, theme: n.theme, spread: n.spread });
+      if (seriesId0) {
+        saveSeriesPrefs(seriesId0, {
+          mode: n.mode,
+          fit: n.fit,
+          webtoonWidth: n.webtoonWidth,
+          theme: n.theme,
+          spread: n.spread,
+          offsetCover: n.offsetCover,
+          navButtons: n.navButtons,
+          tapZone: n.tapZone,
+          invertColors: n.invertColors,
+        });
+      }
       return n;
     });
+
   const applyZoom = (z: number) => {
     const clamped = Math.max(1, Math.min(3, z));
     setZoom(clamped);
     if (seriesId0) saveSeriesPrefs(seriesId0, { zoom: clamped });
   };
 
-  // ---- (re)load on bookId change ----
+  // Clock & battery for ambient HUD
+  useEffect(() => {
+    const updateTime = () => {
+      const now = new Date();
+      setClockTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    };
+    updateTime();
+    const t = setInterval(updateTime, 15_000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    if (typeof navigator !== 'undefined' && 'getBattery' in navigator) {
+      (navigator as any).getBattery?.().then((bat: any) => {
+        setBatteryLevel(Math.round(bat.level * 100));
+        bat.addEventListener('levelchange', () => setBatteryLevel(Math.round(bat.level * 100)));
+      }).catch(() => {});
+    }
+  }, []);
+
+  // Fullscreen tracking
+  useEffect(() => {
+    const onFs = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener('fullscreenchange', onFs);
+    return () => document.removeEventListener('fullscreenchange', onFs);
+  }, []);
+
+  // ---- (re)load on bookId or stream params change ----
   useEffect(() => {
     let alive = true;
     setReady(false);
@@ -194,7 +245,6 @@ function ReaderInner() {
         : await loadChapter(bookId);
       if (!alive) return;
       setFailed(null);
-      // Empty and absent are different sentences, and neither of them is silence.
       const outcome = chapterOutcome(first);
       if (outcome !== 'ok' || !first) { setFailed(outcome === 'ok' ? 'unavailable' : outcome); setReady(true); return; }
 
@@ -234,7 +284,7 @@ function ReaderInner() {
         } catch {}
       }
 
-      // reading direction (drives double-spread pair order for RTL manga)
+      // reading direction
       if (!isStream && first.seriesId) {
         try {
           const s = await api<Series>(`/api/series/${first.seriesId}`);
@@ -248,30 +298,40 @@ function ReaderInner() {
       blobUrls.current.forEach((u) => URL.revokeObjectURL(u));
       blobUrls.current.clear();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bookId, streamSource, streamChapterId, reloadKey]);
+  }, [bookId, streamSource, streamChapterId, streamSeriesId, streamNumber, streamTitle, streamSeriesTitle, isStream, reloadKey]);
 
-  // ---- flat page list across loaded chapters ----
+  // ---- flat page list ----
   const flat: FlatItem[] = useMemo(() => {
-    const arr: FlatItem[] = [];
-    chapters.forEach((ch, ci) =>
-      ch.pages.forEach((p, pi) =>
-        arr.push({ ci, number: p.number, width: p.width, height: p.height, key: `${ch.id}:${p.number}`, firstOfChapter: pi === 0 }),
-      ),
-    );
-    return arr;
+    const out: FlatItem[] = [];
+    chapters.forEach((ch, ci) => {
+      ch.pages.forEach((p, pi) => {
+        out.push({ ci, number: p.number, width: p.width, height: p.height, key: `${ch.id}:${p.number}`, firstOfChapter: pi === 0 });
+      });
+    });
+    return out;
   }, [chapters]);
 
-  // ---- paged slides: 1 page per slide, or double spreads (chapter's first page solo, manga convention) ----
+  // ---- paged slides: 1 page per slide, or double spreads ----
+  const isPaged = prefs.mode.startsWith('paged');
+  const isVerticalPaged = prefs.mode === 'paged-vertical';
+
   const { slides, slideOf } = useMemo(() => {
     const sl: number[][] = [];
-    if (prefs.mode === 'paged' && prefs.spread) {
+    if (isPaged && prefs.spread && !isVerticalPaged) {
       let k = 0;
       while (k < flat.length) {
         const it = flat[k];
         const nxt = flat[k + 1];
-        if (it.firstOfChapter || !nxt || nxt.ci !== it.ci) { sl.push([k]); k++; }
-        else { sl.push([k, k + 1]); k += 2; }
+        if (prefs.offsetCover && (it.firstOfChapter || !nxt || nxt.ci !== it.ci)) {
+          sl.push([k]);
+          k++;
+        } else if (!nxt || nxt.ci !== it.ci) {
+          sl.push([k]);
+          k++;
+        } else {
+          sl.push([k, k + 1]);
+          k += 2;
+        }
       }
     } else {
       for (let k = 0; k < flat.length; k++) sl.push([k]);
@@ -279,21 +339,25 @@ function ReaderInner() {
     const so: number[] = new Array(flat.length);
     sl.forEach((idxs, s) => idxs.forEach((k) => { so[k] = s; }));
     return { slides: sl, slideOf: so };
-  }, [flat, prefs.mode, prefs.spread]);
+  }, [flat, isPaged, prefs.spread, isVerticalPaged, prefs.offsetCover]);
 
   // ---- measure column width (× zoom) ----
   useEffect(() => {
     const measure = () => {
       const w = scrollRef.current?.clientWidth || window.innerWidth;
-      const base = prefs.fitWidth ? Math.min(w, 860) : w;
+      let base = w;
+      if (prefs.mode === 'vertical') {
+        const maxW = prefs.webtoonWidth > 0 ? prefs.webtoonWidth : w;
+        base = Math.min(w, maxW);
+      }
       setColW(base * zoom);
     };
     measure();
     window.addEventListener('resize', measure);
     return () => window.removeEventListener('resize', measure);
-  }, [prefs.fitWidth, ready, zoom]);
+  }, [prefs.mode, prefs.webtoonWidth, ready, zoom]);
 
-  // keep the page roughly centered/in-place when zooming
+  // keep page roughly centered when zooming
   useEffect(() => {
     const el = scrollRef.current;
     if (!el || !didInitScroll.current) return;
@@ -302,7 +366,7 @@ function ReaderInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [zoom, colW]);
 
-  // ---- reserved heights + cumulative tops (incl. chapter dividers) ----
+  // ---- reserved heights + cumulative tops ----
   const { heights, tops } = useMemo(() => {
     const hs = flat.map((p) => (p.width && p.height ? colW * (p.height / p.width) : colW * 1.4));
     const ts: number[] = [];
@@ -363,7 +427,7 @@ function ReaderInner() {
     if (!ready || didInitScroll.current || !colW || !tops.length) return;
     const idx = Math.max(0, Math.min(flat.length - 1, startPage - 1));
     if (prefs.mode === 'vertical' && scrollRef.current && idx > 0) scrollRef.current.scrollTop = tops[idx];
-    if (prefs.mode === 'paged' && scrollRef.current && idx > 0)
+    if (isPaged && scrollRef.current && idx > 0)
       scrollRef.current.scrollLeft = (slideOf[idx] ?? idx) * scrollRef.current.clientWidth;
     setCurrent(idx);
     didInitScroll.current = true;
@@ -374,10 +438,17 @@ function ReaderInner() {
   const onScroll = useCallback(() => {
     const el = scrollRef.current;
     if (!el) return;
-    if (prefs.mode === 'paged') {
+    if (prefs.mode === 'paged-vertical') {
+      const s = Math.round(el.scrollTop / Math.max(1, el.clientHeight));
+      const idxs = slides[Math.max(0, Math.min(slides.length - 1, s))];
+      const i = idxs ? idxs[idxs.length - 1] : 0;
+      setCurrent((c) => (c === i ? c : i));
+      return;
+    }
+    if (isPaged || prefs.mode === 'continuous-horizontal') {
       const s = Math.round(el.scrollLeft / Math.max(1, el.clientWidth));
       const idxs = slides[Math.max(0, Math.min(slides.length - 1, s))];
-      const i = idxs ? idxs[idxs.length - 1] : 0; // last page of a spread → completion fires on the final spread
+      const i = idxs ? idxs[idxs.length - 1] : 0;
       setCurrent((c) => (c === i ? c : i));
       return;
     }
@@ -385,7 +456,7 @@ function ReaderInner() {
     let lo = 0, hi = tops.length - 1, ans = 0;
     while (lo <= hi) { const mid = (lo + hi) >> 1; if (tops[mid] <= probe) { ans = mid; lo = mid + 1; } else hi = mid - 1; }
     setCurrent((c) => (c === ans ? c : ans));
-  }, [tops, prefs.mode, slides]);
+  }, [tops, prefs.mode, isPaged, slides]);
 
   // ---- continuous reading: append next chapter near the end ----
   useEffect(() => {
@@ -402,18 +473,13 @@ function ReaderInner() {
         : await loadChapter(next.id);
       const outcome = chapterOutcome(ch);
       if (outcome === 'ok') setChapters((cs) => (cs.some((c) => c.id === ch!.id) ? cs : [...cs, ch!]));
-      // There IS a next chapter -- chapterRefs says so -- and it would not load. Claiming the series is
-      // finished here is how a corrupt file or a dropped connection came to read as an ending.
       else { noMore.current = true; setFailed(outcome); }
       appending.current = false;
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, ready, flat.length, chapterRefs]);
 
-  // ---- submit progress for the active chapter ----
-  // Two paths: (a) regular page progress, debounced 600ms; (b) chapter COMPLETION, sent immediately —
-  // the debounce used to swallow completions when readers scrolled through a chapter's last page without
-  // lingering (webtoon fast-scroll can even skip it entirely), so finished chapters never counted as read.
+  // ---- submit progress for active chapter ----
   const lastSent = useRef('');
   const completedSent = useRef(new Set<string>());
   const prevPos = useRef<{ ci: number } | null>(null);
@@ -427,13 +493,13 @@ function ReaderInner() {
     const payload = { page, completed, seriesId: sId, deviceId: deviceId() };
     api(`/api/books/${chId}/progress`, { method: 'PUT', json: payload }).catch(() => queueProgress({ bookId: chId, ...payload }));
   }, [isStream]);
+
   useEffect(() => {
     if (!ready || !flat.length) return;
     const it = flat[current];
     if (!it) return;
     const ch = chapters[it.ci];
     if (!ch) return;
-    // crossed forward into a new chapter → the departed chapter is finished, even if its last page was skipped
     const prev = prevPos.current;
     prevPos.current = { ci: it.ci };
     if (prev && it.ci > prev.ci) {
@@ -447,67 +513,66 @@ function ReaderInner() {
     const tag = `${ch.id}:${it.number}`;
     if (lastSent.current === tag) return;
     if (isLastOfChapter && !completedSent.current.has(ch.id)) {
-      // completion fires immediately — a debounce here loses the event when the reader moves on quickly
       completedSent.current.add(ch.id);
-      lastSent.current = tag;
       sendProgress(ch.id, ch.seriesId, it.number, true);
-      return;
-    }
-    const t = setTimeout(() => {
-      lastSent.current = tag;
-      sendProgress(ch.id, ch.seriesId, it.number, false);
-    }, 600);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current, ready, flat.length]);
-
-  // ---- auto-scroll ----
-  useEffect(() => {
-    if (prefs.mode !== 'vertical' || prefs.autoScroll <= 0) return;
-    let raf = 0;
-    const step = () => { if (scrollRef.current) scrollRef.current.scrollTop += prefs.autoScroll; raf = requestAnimationFrame(step); };
-    raf = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(raf);
-  }, [prefs.autoScroll, prefs.mode]);
-
-  // ---- wake lock ----
-  useEffect(() => {
-    let lock: any = null;
-    const req = async () => { try { lock = await (navigator as any).wakeLock?.request('screen'); } catch {} };
-    req();
-    const onVis = () => { if (document.visibilityState === 'visible') req(); };
-    document.addEventListener('visibilitychange', onVis);
-    return () => { try { lock?.release(); } catch {}; document.removeEventListener('visibilitychange', onVis); };
-  }, []);
-
-  // ---- navigation helpers ----
-  const seriesId = chapters[0]?.seriesId || '';
-  // "Up Next" recommendations, fetched once the reader hits the end of the series
-  const { data: upNext } = useQuery({
-    queryKey: ['reader-upnext', seriesId],
-    queryFn: () => api<{ content: Series[] }>(`/api/series/${seriesId}/similar`),
-    enabled: !!seriesId && ended,
-    staleTime: 5 * 60 * 1000,
-  });
-  const activeChapter = chapters[flat[current]?.ci ?? 0];
-  const activeIdx = chapterRefs.findIndex((c) => c.id === activeChapter?.id);
-  const prevId = activeIdx > 0 ? chapterRefs[activeIdx - 1]?.id : undefined;
-  const nextId = activeIdx >= 0 && activeIdx < chapterRefs.length - 1 ? chapterRefs[activeIdx + 1]?.id : undefined;
-
-  // The chapter you are reading always belongs to a series, but nothing in the reader linked to it. The title
-  // was plain text, and the chevron beside it is a history back, which from the home Continue rail lands on
-  // home. So while reading there was no way to reach the series short of searching for it by name.
-  // Prefer the ACTIVE chapter's series over chapters[0]'s: continuous reading appends chapters as you go.
-  const activeSeriesId = activeChapter?.seriesId || seriesId;
-  const seriesHref = activeSeriesId ? `/series/?id=${activeSeriesId}` : null;
-
-  const back = () => {
-    if (typeof window !== 'undefined' && window.history.length > 1) {
-      router.back();
     } else {
-      router.push(isStream ? '/discover' : (seriesId ? `/series/?id=${seriesId}` : '/'));
+      const t = setTimeout(() => {
+        lastSent.current = tag;
+        sendProgress(ch.id, ch.seriesId, it.number, false);
+      }, 600);
+      return () => clearTimeout(t);
     }
+  }, [current, flat, chapters, ready, sendProgress]);
+
+  // ---- auto scroll (vertical mode) ----
+  const reqId = useRef<number | null>(null);
+  const lastFrame = useRef<number>(0);
+  const subPixel = useRef<number>(0);
+  useEffect(() => {
+    if (prefs.mode !== 'vertical' || prefs.autoScroll <= 0 || !ready) return;
+    const step = (t: number) => {
+      const el = scrollRef.current;
+      if (!el) return;
+      if (lastFrame.current) {
+        const dt = (t - lastFrame.current) / 16.666;
+        subPixel.current += prefs.autoScroll * dt;
+        const whole = Math.floor(subPixel.current);
+        if (whole > 0) {
+          el.scrollTop += whole;
+          subPixel.current -= whole;
+        }
+      }
+      lastFrame.current = t;
+      reqId.current = requestAnimationFrame(step);
+    };
+    reqId.current = requestAnimationFrame(step);
+    return () => {
+      if (reqId.current) cancelAnimationFrame(reqId.current);
+      lastFrame.current = 0;
+      subPixel.current = 0;
+    };
+  }, [prefs.autoScroll, prefs.mode, ready]);
+
+  // ---- chapter prev/next navigation ----
+  const activeChapter = flat[current] ? chapters[flat[current].ci] : chapters[0];
+  const seriesId = activeChapter?.seriesId;
+  const currentChapterIndex = chapterRefs.findIndex((c) => c.id === activeChapter?.id);
+  const prevId = currentChapterIndex > 0 ? chapterRefs[currentChapterIndex - 1]?.id : undefined;
+  const nextId = currentChapterIndex >= 0 && currentChapterIndex < chapterRefs.length - 1 ? chapterRefs[currentChapterIndex + 1]?.id : undefined;
+
+  const { data: upNext } = useQuery({
+    queryKey: ['reader-up-next', seriesId],
+    queryFn: () => api<Page<Series>>(`/api/series/${seriesId}/up-next`),
+    enabled: ended && Boolean(seriesId),
+  });
+
+  const seriesHref = isStream ? undefined : seriesId ? `/series/?id=${seriesId}` : undefined;
+  const back = () => {
+    if (typeof window !== 'undefined' && window.history.length > 1) router.back();
+    else if (seriesHref) router.push(seriesHref);
+    else router.push('/');
   };
+
   const goChapter = (cid?: string) => {
     if (!cid) return;
     if (isStream) {
@@ -521,9 +586,51 @@ function ReaderInner() {
       router.replace(`/reader/?book=${cid}`);
     }
   };
+
   const toggleFullscreen = () => {
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     else document.documentElement.requestFullscreen?.().catch(() => {});
+  };
+
+  // Nav helpers for tap zones, shortcuts, and buttons
+  const navNext = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (prefs.mode === 'vertical') {
+      el.scrollBy({ top: el.clientHeight * 0.85, behavior: 'smooth' });
+    } else if (prefs.mode === 'paged-vertical') {
+      el.scrollBy({ top: el.clientHeight, behavior: 'smooth' });
+    } else if (prefs.mode === 'paged-rtl') {
+      el.scrollBy({ left: -el.clientWidth, behavior: 'smooth' });
+    } else {
+      el.scrollBy({ left: el.clientWidth, behavior: 'smooth' });
+    }
+  }, [prefs.mode]);
+
+  const navPrev = useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (prefs.mode === 'vertical') {
+      el.scrollBy({ top: -el.clientHeight * 0.85, behavior: 'smooth' });
+    } else if (prefs.mode === 'paged-vertical') {
+      el.scrollBy({ top: -el.clientHeight, behavior: 'smooth' });
+    } else if (prefs.mode === 'paged-rtl') {
+      el.scrollBy({ left: el.clientWidth, behavior: 'smooth' });
+    } else {
+      el.scrollBy({ left: -el.clientWidth, behavior: 'smooth' });
+    }
+  }, [prefs.mode]);
+
+  // Jump to specific page
+  const jumpToPage = (pgNum: number) => {
+    const targetIdx = flat.findIndex((p) => p.ci === (flat[current]?.ci ?? 0) && p.number === pgNum);
+    if (targetIdx >= 0) {
+      setCurrent(targetIdx);
+      if (prefs.mode === 'vertical') scrollRef.current?.scrollTo({ top: tops[targetIdx] || 0 });
+      else if (prefs.mode === 'paged-vertical') scrollRef.current?.scrollTo({ top: (slideOf[targetIdx] ?? targetIdx) * (scrollRef.current?.clientHeight || 0) });
+      else scrollRef.current?.scrollTo({ left: (slideOf[targetIdx] ?? targetIdx) * (scrollRef.current?.clientWidth || 0) });
+    }
+    setShowPageJump(false);
   };
 
   // ---- ambient cover-art theming ----
@@ -534,49 +641,81 @@ function ReaderInner() {
     return () => { alive = false; clearCover(); };
   }, [seriesId]);
 
-  // ---- adopt this account's reader settings (they follow the user, not the browser) ----
+  // ---- adopt account settings ----
   const pulledPrefs = useRef(false);
   useEffect(() => {
     if (pulledPrefs.current) return;
     pulledPrefs.current = true;
-    // localStorage already painted; this catches up a device that hasn't seen your settings yet
     syncPrefsFromServer().then((p) => setPrefs((cur) => ({ ...cur, ...p }))).catch(() => {});
   }, []);
 
-  // ---- per-series memory (mode/theme/zoom) ----
+  // ---- per-series memory ----
   useEffect(() => {
     if (!seriesId) return;
     const sp = loadSeriesPrefs(seriesId);
-    if (sp.mode || sp.theme || sp.spread !== undefined)
-      setPrefs((cur) => ({ ...cur, ...(sp.mode ? { mode: sp.mode } : {}), ...(sp.theme ? { theme: sp.theme } : {}), ...(sp.spread !== undefined ? { spread: sp.spread } : {}) }));
+    if (sp.mode || sp.theme || sp.fit || sp.spread !== undefined) {
+      setPrefs((cur) => ({
+        ...cur,
+        ...(sp.mode ? { mode: sp.mode } : {}),
+        ...(sp.theme ? { theme: sp.theme } : {}),
+        ...(sp.fit ? { fit: sp.fit } : {}),
+        ...(sp.webtoonWidth !== undefined ? { webtoonWidth: sp.webtoonWidth } : {}),
+        ...(sp.spread !== undefined ? { spread: sp.spread } : {}),
+        ...(sp.offsetCover !== undefined ? { offsetCover: sp.offsetCover } : {}),
+        ...(sp.navButtons !== undefined ? { navButtons: sp.navButtons } : {}),
+        ...(sp.tapZone ? { tapZone: sp.tapZone } : {}),
+        ...(sp.invertColors !== undefined ? { invertColors: sp.invertColors } : {}),
+      }));
+    }
     setZoom(sp.zoom && sp.zoom >= 1 ? sp.zoom : 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seriesId]);
 
   // ---- auto-hide chrome ----
   useEffect(() => {
-    if (!chrome || showSettings) return;
+    if (!chrome || showSettings || showChapters || showPageJump) return;
     const t = setTimeout(() => setChrome(false), 3800);
     return () => clearTimeout(t);
-  }, [chrome, showSettings]);
+  }, [chrome, showSettings, showChapters, showPageJump]);
 
-  // ---- keyboard (desktop) ----
+  // ---- keyboard shortcuts ----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const el = scrollRef.current;
+      if (['INPUT', 'SELECT', 'TEXTAREA'].includes((e.target as HTMLElement)?.tagName)) return;
       if (e.key === '[') goChapter(prevId);
       else if (e.key === ']') goChapter(nextId);
       else if (e.key === 'f') toggleFullscreen();
-      else if (e.key === 'Escape') back();
-      else if (el && prefs.mode === 'vertical' && (e.key === ' ' || e.key === 'ArrowDown')) { e.preventDefault(); el.scrollBy({ top: el.clientHeight * 0.88, behavior: 'smooth' }); }
-      else if (el && prefs.mode === 'vertical' && e.key === 'ArrowUp') { e.preventDefault(); el.scrollBy({ top: -el.clientHeight * 0.88, behavior: 'smooth' }); }
+      else if (e.key === 'm') setChrome((c) => !c);
+      else if (e.key === 'Escape') {
+        if (showSettings) setShowSettings(false);
+        else if (showChapters) setShowChapters(false);
+        else if (showPageJump) setShowPageJump(false);
+        else back();
+      } else if (e.key === 'ArrowRight' || e.key === 'l') {
+        e.preventDefault();
+        if (prefs.mode === 'paged-rtl') navPrev();
+        else navNext();
+      } else if (e.key === 'ArrowLeft' || e.key === 'h') {
+        e.preventDefault();
+        if (prefs.mode === 'paged-rtl') navNext();
+        else navPrev();
+      } else if (e.key === 'ArrowDown' || e.key === 'j') {
+        e.preventDefault();
+        navNext();
+      } else if (e.key === 'ArrowUp' || e.key === 'k') {
+        e.preventDefault();
+        navPrev();
+      } else if (e.key === ' ') {
+        e.preventDefault();
+        if (e.shiftKey) navPrev();
+        else navNext();
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [prevId, nextId, prefs.mode, seriesId]);
+  }, [prevId, nextId, prefs.mode, navNext, navPrev, showSettings, showChapters, showPageJump]);
 
-  // ---- tap / double-tap / pinch (no overlay -> native scroll works) ----
+  // ---- pointer / tap gesture handling ----
   const onPointerDown = (e: React.PointerEvent) => {
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.current.size === 2) {
@@ -588,6 +727,7 @@ function ReaderInner() {
       tap.current = { x: e.clientX, y: e.clientY, t: Date.now() };
     }
   };
+
   const onPointerMove = (e: React.PointerEvent) => {
     if (!pointers.current.has(e.pointerId)) return;
     pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -597,6 +737,7 @@ function ReaderInner() {
       setZoom(Math.max(1, Math.min(3, pinch.current.zoom * (dist / pinch.current.dist))));
     }
   };
+
   const onPointerEnd = (e: React.PointerEvent) => {
     const wasPinch = !!pinch.current;
     pointers.current.delete(e.pointerId);
@@ -609,7 +750,7 @@ function ReaderInner() {
     if (wasPinch) return;
     const s = tap.current; tap.current = null;
     if (!s) return;
-    if (Math.abs(e.clientX - s.x) > 10 || Math.abs(e.clientY - s.y) > 10 || Date.now() - s.t > 300) return; // scroll/long-press
+    if (Math.abs(e.clientX - s.x) > 10 || Math.abs(e.clientY - s.y) > 10 || Date.now() - s.t > 300) return;
     const now = Date.now();
     if (now - lastTapAt.current < 300) {
       if (tapTimer.current) { clearTimeout(tapTimer.current); tapTimer.current = null; }
@@ -618,25 +759,51 @@ function ReaderInner() {
       return;
     }
     lastTapAt.current = now;
+
     const x = e.clientX;
+    const y = e.clientY;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+
     tapTimer.current = setTimeout(() => {
       tapTimer.current = null;
-      if (prefs.mode === 'paged') {
-        const w = scrollRef.current?.clientWidth || window.innerWidth;
-        if (x < w * 0.3) scrollRef.current?.scrollBy({ left: -w, behavior: 'smooth' });
-        else if (x > w * 0.7) scrollRef.current?.scrollBy({ left: w, behavior: 'smooth' });
+      if (prefs.tapZone === 'off') {
+        setChrome((c) => !c);
+        return;
+      }
+
+      if (prefs.tapZone === 'kindle') {
+        if (y < h * 0.18) setChrome((c) => !c);
+        else if (x < w * 0.22) navPrev();
+        else navNext();
+        return;
+      }
+
+      if (prefs.tapZone === 'l-shaped') {
+        if (y > h * 0.72 || x > w * 0.72) navNext();
+        else if (x < w * 0.25 || y < h * 0.20) navPrev();
         else setChrome((c) => !c);
-      } else setChrome((c) => !c);
+        return;
+      }
+
+      // Default 3-Zone
+      if (x < w * 0.30) {
+        if (prefs.mode === 'paged-rtl') navNext();
+        else navPrev();
+      } else if (x > w * 0.70) {
+        if (prefs.mode === 'paged-rtl') navPrev();
+        else navNext();
+      } else {
+        setChrome((c) => !c);
+      }
     }, 260);
   };
 
   const total = flat.length;
   const pageInChapter = activeChapter ? (flat[current]?.number ?? 0) : 0;
+  const chapterPageCount = activeChapter?.pages.length ?? 0;
 
-  // ---- bookmarks ----
-  // A bookmark is a note about a page, not a pointer to bytes, so it is keyed on (book, page) and survives
-  // anything that happens to the file -- the same reasoning that keeps reading progress when a series' files
-  // are deleted. Loaded per chapter so the star reflects the page you are actually on.
+  // Bookmarks
   const [marks, setMarks] = useState<Set<string>>(new Set());
   const markKey = (bookId: string, page: number) => `${bookId}:${page}`;
   const bookmarked = activeChapter ? marks.has(markKey(activeChapter.id, pageInChapter)) : false;
@@ -651,8 +818,6 @@ function ReaderInner() {
     if (!activeChapter || !pageInChapter) return;
     const k = markKey(activeChapter.id, pageInChapter);
     const on = marks.has(k);
-    // Optimistic: the star is a one-tap control in a reader, and waiting on a round-trip to redraw it makes
-    // it feel broken. Reverted if the write fails.
     setMarks((prev) => { const n = new Set(prev); on ? n.delete(k) : n.add(k); return n; });
     try {
       await api(`/api/bookmarks/${encodeURIComponent(activeChapter.id)}/${pageInChapter}`,
@@ -661,9 +826,8 @@ function ReaderInner() {
       setMarks((prev) => { const n = new Set(prev); on ? n.add(k) : n.delete(k); return n; });
     }
   };
-  const chapterPageCount = activeChapter?.pages.length ?? 0;
 
-  // the header's two-line "what you are reading" block, wrapped in a link to the series when we know its id
+  // Title header block
   const titleBlock = (
     <>
       <p className="flex items-center gap-1.5 text-sm font-medium text-white transition group-hover:text-accent">
@@ -679,11 +843,6 @@ function ReaderInner() {
     </>
   );
 
-  // end-of-series "Up Next" card (rendered at the tail of both reading modes)
-  /**
-   * What the reader sees when a chapter will not open. Previously nothing: a black screen on first load, or
-   * the "You finished" card mid-series. Both told them to stop looking.
-   */
   const retry = () => { setFailed(null); setReady(false); setReloadKey((k) => k + 1); };
   const failureCard = (
     <motion.div initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.4 }}
@@ -712,8 +871,6 @@ function ReaderInner() {
       <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-fog-500">{tr('You finished')}</p>
       <h2 className="mt-1.5 font-display text-2xl font-bold text-white">{activeChapter?.seriesTitle || 'this series'}</h2>
       <div className="mt-6 flex justify-center gap-2">
-        {/* labelled "Back to series", so go to the series -- `back` is history-first and from the home
-            Continue rail would land on home instead */}
         <button onClick={() => (seriesHref ? router.push(seriesHref) : back())} className="btn-ghost text-sm">{tr('Back to series')}</button>
         <button onClick={() => router.push('/')} className="btn-accent text-sm">{tr('Home')}</button>
       </div>
@@ -726,18 +883,73 @@ function ReaderInner() {
     </motion.div>
   );
 
+  // Fit class for paged modes
+  const pagedFitClass = {
+    contain: 'max-h-full max-w-full object-contain',
+    width: 'w-full h-auto max-h-none object-contain',
+    height: 'h-full w-auto max-w-none object-contain',
+    original: 'max-h-none max-w-none object-none',
+  }[prefs.fit || 'contain'];
+
+  const webtoonImgClass = prefs.fit === 'original'
+    ? 'max-w-none object-none mx-auto'
+    : 'block w-full object-contain';
+
   return (
-    <div className="fixed inset-0 z-40 bg-ink-950">
+    <div className="fixed inset-0 z-40 bg-ink-950 select-none">
       <div className="pointer-events-none absolute inset-0 z-30 bg-black" style={{ opacity: 1 - prefs.brightness }} />
-      {/* ambient cover wash framing the reader */}
+      {/* ambient cover wash */}
       <div className="pointer-events-none absolute inset-x-0 top-0 z-20 h-36" style={{ background: 'linear-gradient(to bottom, rgb(var(--cover, 0 0 0) / 0.16), transparent)' }} />
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 h-36" style={{ background: 'linear-gradient(to top, rgb(var(--cover, 0 0 0) / 0.16), transparent)' }} />
 
-      {/* PAGES */}
+      {/* FLOATING NAVIGATION BUTTONS */}
+      {prefs.navButtons && (
+        <div className="pointer-events-none fixed inset-y-0 inset-x-3 z-30 flex items-center justify-between">
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); prefs.mode === 'paged-rtl' ? navNext() : navPrev(); }}
+            className="pointer-events-auto flex h-12 w-12 items-center justify-center rounded-full bg-black/60 text-white/90 backdrop-blur-md border border-ink-700/60 shadow-xl active:scale-95 transition hover:bg-black/80 hover:text-white"
+            aria-label={prefs.mode === 'paged-rtl' ? tr('Next page') : tr('Previous page')}
+          >
+            <IcChevronLeft width={24} height={24} />
+          </button>
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); prefs.mode === 'paged-rtl' ? navPrev() : navNext(); }}
+            className="pointer-events-auto flex h-12 w-12 items-center justify-center rounded-full bg-black/60 text-white/90 backdrop-blur-md border border-ink-700/60 shadow-xl active:scale-95 transition hover:bg-black/80 hover:text-white"
+            aria-label={prefs.mode === 'paged-rtl' ? tr('Previous page') : tr('Next page')}
+          >
+            <IcChevronRight width={24} height={24} />
+          </button>
+        </div>
+      )}
+
+      {/* AMBIENT MINIMAL READING HUD */}
+      {!chrome && prefs.showHud && (
+        <div className="pointer-events-none fixed bottom-3 left-1/2 -translate-x-1/2 z-30 flex items-center gap-2 rounded-full bg-black/60 px-3.5 py-1 text-[11px] font-medium text-fog-400 backdrop-blur-md border border-ink-700/40 shadow-sm transition-opacity">
+          <span className="truncate max-w-[120px] sm:max-w-[180px]">{activeChapter?.title || `Ch. ${pageInChapter}`}</span>
+          <span className="text-ink-600">•</span>
+          <span className="tabular-nums text-fog-200">{chapterPageCount ? `${pageInChapter}/${chapterPageCount}` : `${current + 1}/${total}`}</span>
+          {clockTime && (
+            <>
+              <span className="text-ink-600">•</span>
+              <span className="tabular-nums">{clockTime}</span>
+            </>
+          )}
+          {batteryLevel !== null && (
+            <>
+              <span className="text-ink-600">•</span>
+              <span className="tabular-nums">{batteryLevel}%</span>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* PAGES RENDERING VIEWPORTS */}
       {prefs.mode === 'vertical' ? (
         <div ref={scrollRef} data-lenis-prevent onScroll={onScroll} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerEnd} onPointerCancel={onPointerEnd}
           className={`h-screen-d touch-pan-y overflow-y-auto overscroll-contain ${zoom > 1 ? 'overflow-x-auto' : 'overflow-x-hidden'}`}>
-          <div className="mx-auto" style={{ width: colW || '100%', filter: THEME_FILTER[prefs.theme] }}>
+          <div className="mx-auto" style={{ width: colW || '100%', filter: getEffectiveFilter(prefs.theme, prefs.invertColors) }}>
             <div className="h-2" />
             {flat.map((p, i) => (
               <div key={p.key}>
@@ -749,10 +961,10 @@ function ReaderInner() {
                     <span className="h-px w-8 bg-ink-700" />
                   </div>
                 )}
-                <div style={{ height: heights[i] || undefined, marginBottom: prefs.gap }} className="relative w-full bg-ink-900">
+                <div style={{ height: heights[i] || undefined, marginBottom: prefs.gap }} className="relative w-full bg-ink-900 flex justify-center">
                   {activeSet.has(i) && srcFor(i) ? (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img src={srcFor(i)!} alt={`Page ${p.number}`} className="block h-full w-full object-cover" decoding="async" />
+                    <img src={srcFor(i)!} alt={`Page ${p.number}`} className={webtoonImgClass} decoding="async" />
                   ) : (
                     <div className="flex h-full w-full items-center justify-center text-xs text-ink-600">{p.number}</div>
                   )}
@@ -763,11 +975,66 @@ function ReaderInner() {
             {failed && !!flat.length && failureCard}
           </div>
         </div>
-      ) : (
+      ) : prefs.mode === 'paged-vertical' ? (
         <div ref={scrollRef} data-lenis-prevent onScroll={onScroll} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerEnd} onPointerCancel={onPointerEnd}
-          className="hide-scrollbar flex h-screen-d snap-x snap-mandatory overflow-x-auto overflow-y-hidden" style={{ filter: THEME_FILTER[prefs.theme] }}>
+          className="hide-scrollbar flex flex-col h-screen-d snap-y snap-mandatory overflow-y-auto overflow-x-hidden"
+          style={{ filter: getEffectiveFilter(prefs.theme, prefs.invertColors) }}>
+          {slides.map((idxs) => (
+            <div key={flat[idxs[0]].key} className="relative flex h-screen-d w-full shrink-0 snap-center items-center justify-center p-1">
+              {idxs.map((i) => {
+                const p = flat[i];
+                return activeSet.has(i) && srcFor(i) ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img key={p.key} src={srcFor(i)!} alt={`Page ${p.number}`}
+                    className={pagedFitClass}
+                    decoding="async" style={{ transform: zoom !== 1 ? `scale(${zoom})` : undefined }} />
+                ) : (
+                  <span key={p.key} className="text-ink-600">{p.number}</span>
+                );
+              })}
+            </div>
+          ))}
+          {ended && (
+            <div className="flex h-screen-d w-full shrink-0 snap-center items-start justify-center overflow-y-auto p-4">
+              {upNextCard}
+            </div>
+          )}
+          {failed && !!flat.length && (
+            <div className="flex h-screen-d w-full shrink-0 snap-center items-start justify-center overflow-y-auto p-4">
+              {failureCard}
+            </div>
+          )}
+        </div>
+      ) : prefs.mode === 'continuous-horizontal' ? (
+        <div ref={scrollRef} data-lenis-prevent onScroll={onScroll} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerEnd} onPointerCancel={onPointerEnd}
+          className="hide-scrollbar flex h-screen-d overflow-x-auto overflow-y-hidden"
+          style={{ filter: getEffectiveFilter(prefs.theme, prefs.invertColors) }}>
+          {flat.map((p, i) => (
+            <div key={p.key} style={{ marginRight: prefs.gap }} className="relative flex h-full shrink-0 items-center justify-center">
+              {activeSet.has(i) && srcFor(i) ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={srcFor(i)!} alt={`Page ${p.number}`}
+                  className="h-full w-auto max-w-none object-contain"
+                  decoding="async" style={{ transform: zoom !== 1 ? `scale(${zoom})` : undefined }} />
+              ) : (
+                <span className="text-ink-600 px-6">{p.number}</span>
+              )}
+            </div>
+          ))}
+          {ended && (
+            <div className="flex h-full shrink-0 items-center justify-center p-8 overflow-y-auto">
+              {upNextCard}
+            </div>
+          )}
+        </div>
+      ) : (
+        // Paged RTL or Paged LTR
+        <div ref={scrollRef} data-lenis-prevent onScroll={onScroll} onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerEnd} onPointerCancel={onPointerEnd}
+          className="hide-scrollbar flex h-screen-d snap-x snap-mandatory overflow-x-auto overflow-y-hidden"
+          style={{ filter: getEffectiveFilter(prefs.theme, prefs.invertColors) }}>
           {slides.map((idxs) => {
-            const shown = rtl && idxs.length === 2 ? [idxs[1], idxs[0]] : idxs; // RTL manga: right page reads first
+            const isRtlMode = prefs.mode === 'paged-rtl';
+            const shown = isRtlMode && idxs.length === 2 ? [idxs[1], idxs[0]] : idxs;
             return (
               <div key={flat[idxs[0]].key} className="relative flex h-full w-full shrink-0 snap-center items-center justify-center gap-1">
                 {shown.map((i) => {
@@ -775,7 +1042,7 @@ function ReaderInner() {
                   return activeSet.has(i) && srcFor(i) ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img key={p.key} src={srcFor(i)!} alt={`Page ${p.number}`}
-                      className={`max-h-full object-contain ${idxs.length === 2 ? 'max-w-[50%]' : 'max-w-full'}`}
+                      className={`${pagedFitClass} ${idxs.length === 2 ? 'max-w-[50%]' : ''}`}
                       decoding="async" style={{ transform: zoom !== 1 ? `scale(${zoom})` : undefined }} />
                   ) : (
                     <span key={p.key} className="text-ink-600">{p.number}</span>
@@ -797,20 +1064,16 @@ function ReaderInner() {
         </div>
       )}
 
-      {/* CHROME */}
+      {/* HEADER & FOOTER CHROME */}
       <AnimatePresence>
         {chrome && (
           <>
             <motion.header initial={{ y: -64, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: -64, opacity: 0 }}
               className="absolute inset-x-0 top-0 z-40 flex items-center gap-2 bg-gradient-to-b from-black/90 via-black/55 to-transparent px-3 pb-8 pt-[max(0.9rem,calc(env(safe-area-inset-top)+0.55rem))]">
-              <button onClick={back} className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-black/45 text-white backdrop-blur">
+              <button onClick={back} className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-black/45 text-white backdrop-blur hover:bg-black/60 transition" aria-label={tr('Back')}>
                 <IcChevronLeft width={22} height={22} />
               </button>
-              {/* Tapping the title is the route to the series while reading, and the chevron is the whole
-                  affordance -- without it this reads as inert as it used to. BOTH lines are inside the link
-                  deliberately: the title alone is a ~20px strip wedged between two 40px buttons, and a
-                  near-miss lands on the header's transparent gradient and does nothing at all, which is the
-                  same dead tap being complained about. active:opacity-80 because touch has no hover. */}
+
               {seriesHref ? (
                 <Link href={seriesHref} aria-label={`Open ${activeChapter?.seriesTitle || 'this'} series page`}
                   className="group min-w-0 flex-1 transition active:opacity-80">
@@ -819,21 +1082,34 @@ function ReaderInner() {
               ) : (
                 <div className="min-w-0 flex-1">{titleBlock}</div>
               )}
-              {/* desktop chapter jump */}
-              {chapterRefs.length > 0 && (
-                <select value={activeChapter?.id || ''} onChange={(e) => goChapter(e.target.value)}
-                  className="hidden max-w-[180px] rounded-full border border-ink-600 bg-ink-900/80 px-3 py-2 text-xs text-fog-200 outline-none lg:block">
-                  {chapterRefs.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
-                </select>
-              )}
+
+              {/* Chapter drawer trigger (Both Mobile & Desktop) */}
+              <button
+                type="button"
+                onClick={() => setShowChapters(true)}
+                className="flex items-center gap-1.5 rounded-full border border-ink-600 bg-black/45 px-3 py-1.5 text-xs text-fog-200 hover:text-white backdrop-blur transition active:scale-95"
+                title={tr('Chapter List')}
+              >
+                <span>📑</span>
+                <span className="hidden sm:inline font-medium">{tr('Chapters')}</span>
+                {chapterRefs.length > 0 && (
+                  <span className="chip text-[10px] py-0 px-1.5 bg-ink-700 text-fog-300">
+                    {chapterRefs.length}
+                  </span>
+                )}
+              </button>
+
+              {/* Bookmark */}
               <button onClick={toggleBookmark} aria-label={bookmarked ? 'Remove bookmark' : 'Bookmark this page'}
                 aria-pressed={bookmarked}
-                className={`grid h-10 w-10 shrink-0 place-items-center rounded-full bg-black/45 backdrop-blur ${bookmarked ? 'text-accent' : 'text-white'}`}>
+                className={`grid h-10 w-10 shrink-0 place-items-center rounded-full bg-black/45 backdrop-blur transition hover:bg-black/60 ${bookmarked ? 'text-accent' : 'text-white'}`}>
                 <svg width="20" height="20" viewBox="0 0 24 24" fill={bookmarked ? 'currentColor' : 'none'}
                      stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round">
                   <path d="M6 3h12a1 1 0 0 1 1 1v17l-7-4-7 4V4a1 1 0 0 1 1-1Z" />
                 </svg>
               </button>
+
+              {/* Save stream chapter to library */}
               {isStream && streamSource && streamSeriesId && (
                 <button
                   type="button"
@@ -859,20 +1135,46 @@ function ReaderInner() {
                   <span>💾</span> {downloadingStream ? tr('Saving…') : tr('Save Chapter')}
                 </button>
               )}
-              <button onClick={() => setShowSettings(true)} className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-black/45 text-white backdrop-blur">
+
+              {/* Fullscreen Button */}
+              <button
+                type="button"
+                onClick={toggleFullscreen}
+                className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-black/45 text-white backdrop-blur hover:bg-black/60 transition"
+                title={tr('Toggle Fullscreen')}
+                aria-label={tr('Toggle Fullscreen')}
+              >
+                {isFullscreen ? (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3" />
+                  </svg>
+                ) : (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                  </svg>
+                )}
+              </button>
+
+              {/* Settings Button */}
+              <button onClick={() => setShowSettings(true)} className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-black/45 text-white backdrop-blur hover:bg-black/60 transition" aria-label={tr('Reader Settings')}>
                 <IcSliders width={20} height={20} />
               </button>
             </motion.header>
 
+            {/* FOOTER SCRUBBER */}
             <motion.footer initial={{ y: 64, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 64, opacity: 0 }}
               className="absolute inset-x-0 bottom-0 z-40 bg-gradient-to-t from-black/90 via-black/55 to-transparent px-4 pt-10 pb-[max(0.9rem,calc(env(safe-area-inset-bottom)+0.4rem))]">
-              <div className="relative mx-auto flex max-w-3xl items-center gap-2">
-                {/* scrubber preview: a small render of the target page while dragging */}
+              <div className="relative mx-auto flex max-w-3xl items-center gap-2.5">
+                {/* Scrubber thumbnail preview with stream support */}
                 {scrubbing && flat[current] && (() => {
                   const it = flat[current];
                   const ch = chapters[it.ci];
                   if (!ch) return null;
-                  const src = ch.offline ? blobUrls.current.get(it.key) || null : img.page(ch.id, it.number, 200);
+                  const src = ch.stream && ch.streamPageUrls
+                    ? ch.streamPageUrls[it.number - 1] || null
+                    : ch.offline
+                    ? blobUrls.current.get(it.key) || null
+                    : img.page(ch.id, it.number, 200);
                   return (
                     <div className="pointer-events-none absolute bottom-full left-1/2 mb-3 -translate-x-1/2 overflow-hidden rounded-xl border border-ink-600 bg-ink-900 shadow-lift">
                       {src ? (
@@ -885,24 +1187,44 @@ function ReaderInner() {
                     </div>
                   );
                 })()}
+
+                {/* Prev chapter button */}
                 <button onClick={() => goChapter(prevId)} disabled={!prevId}
-                  className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-black/45 text-white backdrop-blur disabled:opacity-30">
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-black/45 text-white backdrop-blur disabled:opacity-30 hover:bg-black/60 transition"
+                  title={tr('Previous Chapter')}>
                   <IcChevronLeft width={18} height={18} />
                 </button>
-                <span className="shrink-0 text-[11px] tabular-nums text-fog-300">{chapterPageCount ? `${pageInChapter}/${chapterPageCount}` : `${current + 1}/${total}`}</span>
-                <input type="range" min={0} max={Math.max(0, total - 1)} value={current}
-                  onPointerDown={() => setScrubbing(true)}
-                  onPointerUp={() => setScrubbing(false)}
-                  onPointerCancel={() => setScrubbing(false)}
-                  onChange={(e) => {
-                    const idx = Number(e.target.value);
-                    setCurrent(idx);
-                    if (prefs.mode === 'vertical') scrollRef.current?.scrollTo({ top: tops[idx] || 0 });
-                    else scrollRef.current?.scrollTo({ left: (slideOf[idx] ?? idx) * (scrollRef.current?.clientWidth || 0) });
-                  }}
-                  className="h-1 flex-1 accent-[rgb(var(--accent))]" />
+
+                {/* Direct Page Jump trigger */}
+                <button
+                  type="button"
+                  onClick={() => { setJumpPageVal(String(pageInChapter || current + 1)); setShowPageJump(true); }}
+                  className="shrink-0 rounded-lg px-2.5 py-1 text-[11px] tabular-nums font-semibold text-fog-200 hover:bg-white/10 hover:text-white transition"
+                  title={tr('Jump to page')}
+                >
+                  {chapterPageCount ? `${pageInChapter} / ${chapterPageCount}` : `${current + 1} / ${total}`}
+                </button>
+
+                {/* Slider with chunky touch target */}
+                <div className="flex-1 py-2 flex items-center">
+                  <input type="range" min={0} max={Math.max(0, total - 1)} value={current}
+                    onPointerDown={() => setScrubbing(true)}
+                    onPointerUp={() => setScrubbing(false)}
+                    onPointerCancel={() => setScrubbing(false)}
+                    onChange={(e) => {
+                      const idx = Number(e.target.value);
+                      setCurrent(idx);
+                      if (prefs.mode === 'vertical') scrollRef.current?.scrollTo({ top: tops[idx] || 0 });
+                      else if (prefs.mode === 'paged-vertical') scrollRef.current?.scrollTo({ top: (slideOf[idx] ?? idx) * (scrollRef.current?.clientHeight || 0) });
+                      else scrollRef.current?.scrollTo({ left: (slideOf[idx] ?? idx) * (scrollRef.current?.clientWidth || 0) });
+                    }}
+                    className="h-2 w-full cursor-pointer accent-[rgb(var(--accent))]" />
+                </div>
+
+                {/* Next chapter button */}
                 <button onClick={() => goChapter(nextId)} disabled={!nextId}
-                  className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-black/45 text-white backdrop-blur disabled:opacity-30">
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-black/45 text-white backdrop-blur disabled:opacity-30 hover:bg-black/60 transition"
+                  title={tr('Next Chapter')}>
                   <IcChevronRight width={18} height={18} />
                 </button>
               </div>
@@ -911,6 +1233,51 @@ function ReaderInner() {
         )}
       </AnimatePresence>
 
+      {/* CHAPTER DRAWER */}
+      <ChapterDrawer
+        open={showChapters}
+        title={activeChapter?.seriesTitle}
+        currentId={activeChapter?.id}
+        chapters={chapterRefs}
+        onSelect={goChapter}
+        onClose={() => setShowChapters(false)}
+      />
+
+      {/* DIRECT PAGE JUMP MODAL */}
+      {showPageJump && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowPageJump(false)} />
+          <div className="relative z-10 w-full max-w-xs rounded-2xl border border-ink-700 bg-ink-900/95 p-5 shadow-2xl backdrop-blur-2xl">
+            <h4 className="font-display text-sm font-semibold text-white mb-2">{tr('Jump to Page')}</h4>
+            <p className="text-xs text-fog-400 mb-3">{tr('Enter page number (1 to {max})', { max: chapterPageCount || total })}</p>
+            <form onSubmit={(e) => {
+              e.preventDefault();
+              const val = parseInt(jumpPageVal, 10);
+              if (!isNaN(val)) jumpToPage(val);
+            }}>
+              <input
+                type="number"
+                min={1}
+                max={chapterPageCount || total}
+                value={jumpPageVal}
+                onChange={(e) => setJumpPageVal(e.target.value)}
+                className="w-full rounded-xl border border-ink-700 bg-ink-800 px-3 py-2 text-sm text-fog-100 outline-none focus:border-accent mb-4"
+                autoFocus
+              />
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setShowPageJump(false)} className="btn-ghost flex-1 py-2 text-xs">
+                  {tr('Cancel')}
+                </button>
+                <button type="submit" className="btn-accent flex-1 py-2 text-xs">
+                  {tr('Go')}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* READER SETTINGS MODAL */}
       <AnimatePresence>
         {showSettings && <ReaderSettings prefs={prefs} set={setPref} onClose={() => setShowSettings(false)} />}
       </AnimatePresence>
@@ -920,7 +1287,6 @@ function ReaderInner() {
           <div className="animate-pulse-soft text-fog-500">{tr('Loading chapter…')}</div>
         </div>
       )}
-      {/* Nothing loaded at all. `ready` alone used to clear the overlay here and leave the bare backdrop. */}
       {ready && failed && !flat.length && (
         <div className="absolute inset-0 z-50 flex items-center justify-center overflow-y-auto bg-ink-950">
           {failureCard}

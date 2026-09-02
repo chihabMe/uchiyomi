@@ -1,23 +1,48 @@
 export type ReaderTheme = 'amoled' | 'sepia' | 'gray';
 
+export type ReaderMode =
+  | 'vertical'             // Continuous vertical (Webtoon)
+  | 'paged-rtl'            // Manga (Right to Left)
+  | 'paged-ltr'            // Western / Manhua (Left to Right)
+  | 'paged-vertical'       // Vertical single-page flip
+  | 'continuous-horizontal'; // Continuous horizontal strip
+
+export type FitMode = 'contain' | 'width' | 'height' | 'original';
+
+export type TapZone = 'default' | 'l-shaped' | 'kindle' | 'off';
+
 export interface ReaderPrefs {
   gap: number; // px between pages (0 = seamless webtoon)
   brightness: number; // 0.25 .. 1
-  mode: 'vertical' | 'paged';
+  mode: ReaderMode;
+  fit: FitMode;
+  webtoonWidth: number; // 0 = full width, or 500..1400 px
   autoScroll: number; // px/frame, 0 = off
-  fitWidth: boolean;
   theme: ReaderTheme;
-  spread: boolean; // paged mode: two pages side by side (manga double-page convention)
+  spread: boolean; // double spread in paged mode
+  offsetCover: boolean; // first page is solo cover in double spread
+  navButtons: boolean; // floating < and > buttons on screen
+  tapZone: TapZone;
+  showHud: boolean; // minimal ambient pill (page/time/battery)
+  invertColors: boolean; // invert white manga pages
+  // Legacy compatibility
+  fitWidth?: boolean;
 }
 
 export const DEFAULT_PREFS: ReaderPrefs = {
   gap: 0,
   brightness: 1,
   mode: 'vertical',
+  fit: 'contain',
+  webtoonWidth: 860,
   autoScroll: 0,
-  fitWidth: true,
   theme: 'amoled',
   spread: false,
+  offsetCover: true,
+  navButtons: false,
+  tapZone: 'default',
+  showHud: true,
+  invertColors: false,
 };
 
 const KEY = 'yomi_reader_prefs';
@@ -32,7 +57,16 @@ let syncTimer: ReturnType<typeof setTimeout> | null = null;
 export function loadPrefs(): ReaderPrefs {
   if (typeof window === 'undefined') return DEFAULT_PREFS;
   try {
-    return { ...DEFAULT_PREFS, ...JSON.parse(localStorage.getItem(KEY) || '{}') };
+    const raw = JSON.parse(localStorage.getItem(KEY) || '{}');
+    const out: ReaderPrefs = { ...DEFAULT_PREFS, ...raw };
+    // Legacy migration
+    if ((raw.mode as any) === 'paged') {
+      out.mode = 'paged-rtl';
+    }
+    if (raw.fitWidth !== undefined && !raw.fit) {
+      out.fit = raw.fitWidth ? 'width' : 'contain';
+    }
+    return out;
   } catch {
     return DEFAULT_PREFS;
   }
@@ -99,10 +133,16 @@ function allSeriesPrefs(): Record<string, SeriesPrefs> {
 
 // ---- per-series memory (mode/theme/zoom remembered per title) ----
 export interface SeriesPrefs {
-  mode?: ReaderPrefs['mode'];
+  mode?: ReaderMode;
+  fit?: FitMode;
+  webtoonWidth?: number;
   theme?: ReaderTheme;
   zoom?: number;
   spread?: boolean;
+  offsetCover?: boolean;
+  navButtons?: boolean;
+  tapZone?: TapZone;
+  invertColors?: boolean;
 }
 
 export function loadSeriesPrefs(seriesId: string): SeriesPrefs {
@@ -128,3 +168,9 @@ export const THEME_FILTER: Record<ReaderTheme, string> = {
   sepia: 'sepia(0.55) saturate(1.15) brightness(0.94)',
   gray: 'grayscale(0.25) brightness(0.88) contrast(0.95)',
 };
+
+export function getEffectiveFilter(theme: ReaderTheme, invert: boolean): string {
+  const base = THEME_FILTER[theme] || 'none';
+  if (!invert) return base;
+  return base === 'none' ? 'invert(1) hue-rotate(180deg)' : `${base} invert(1) hue-rotate(180deg)`;
+}
